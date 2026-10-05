@@ -7,18 +7,22 @@
     ВАЖНО: боевые разделы (Aimbot/Triggerbot) здесь — ТОЛЬКО интерфейс.
     Элементы хранят значения в конфиге и НЕ подключены к наведению/стрельбе.
 
+    Anti-Aim (крутилка): подменяет поворот персонажа в исходящем
+    PlayerSync — другие игроки видят вращение. Режимы: Spin/Jitter/Random/Backward.
+
     Активация: команда /ragemd или клавиша из настроек.
-    Зависимости: MoonLoader 0.26+, SAMPFUNCS, mimgui
+    Зависимости: MoonLoader 0.26+, SAMPFUNCS, mimgui, SAMP.Lua (samp.events)
 ]]
 
 script_name('rage-mod')
 script_author('rage-mod')
-script_version('2.0.0')
+script_version('2.1.0')
 
 local imgui    = require 'mimgui'
 local encoding = require 'encoding'
 local inicfg   = require 'inicfg'
 local ffi      = require 'ffi'
+local sampev   = require 'samp.events'
 encoding.default = 'CP1251'
 local u8  = encoding.UTF8
 local new = imgui.new
@@ -75,6 +79,14 @@ local S = {
     tb_mindmg    = new.int(100),
     tb_delaytype = new.int(0),     -- Delays: Type
 
+    -- Anti-Aim / крутилка
+    aa_enable    = new.bool(false),
+    aa_mode      = new.int(0),     -- Spin / Jitter / Random / Backward
+    aa_speed     = new.int(25),    -- градусов за пакет (Spin)
+    aa_jitter    = new.int(90),    -- разброс (Jitter)
+    aa_noaim     = new.bool(true), -- не крутить при прицеливании (ПКМ)
+    aa_key       = new.int(0),     -- клавиша вкл/выкл
+
     -- Прочее
     menu_key     = new.int(1),
 }
@@ -85,6 +97,7 @@ local fovTypeItems    = { 'Static', 'Dynamic' }
 local smoothTypeItems = { 'Decrease', 'Static', 'Increase' }
 local tbTypeItems     = { 'Normal', 'Burst' }
 local delayTypeItems  = { 'Static', 'Random' }
+local aaModeItems     = { 'Spin', 'Jitter', 'Random', 'Backward' }
 
 local keyNames = { 'Нет', 'Insert', 'Delete', 'Home', 'End', 'F2', 'F3' }
 local keyCodes = { 0, 0x2D, 0x2E, 0x24, 0x23, 0x71, 0x72 }
@@ -94,6 +107,7 @@ local keyItems = new['const char*'][#keyNames](keyNames)
 local sidebar = {
     { group = 'Combat' },
     { page = 'Aimbot',  icon = 'aim' },
+    { page = 'Anti-Aim', icon = 'spin' },
     { group = 'Visuals' },
     { page = 'Players', icon = 'ply' },
     { page = 'Items',   icon = 'itm' },
@@ -312,6 +326,10 @@ local function drawSideIcon(dl, x, y, kind, col)
         dl:AddCircleFilled(imgui.ImVec2(x + 4, y + 9), 4, col, 14)
         dl:AddCircleFilled(imgui.ImVec2(x + 10, y + 8), 5, col, 14)
         dl:AddRectFilled(imgui.ImVec2(x + 3, y + 9), imgui.ImVec2(x + 13, y + 13), col, 1)
+    elseif kind == 'spin' then
+        dl:AddCircle(imgui.ImVec2(x + s, y + s), 6, col, 16, 1.6)
+        dl:AddTriangleFilled(imgui.ImVec2(x + s + 4, y - 1),
+            imgui.ImVec2(x + s + 9, y + 2), imgui.ImVec2(x + s + 4, y + 5), col)
     end
 end
 
@@ -372,6 +390,27 @@ local function colWeaponRight()
         imgui.BeginTooltip(); imgui.Text('Shot delay behaviour'); imgui.EndTooltip()
     end
     Combo('##tb_dtype', delayTypeItems, S.tb_delaytype)
+end
+
+-- Страница Anti-Aim (крутилка)
+local function pageAntiAim()
+    local avail = imgui.GetContentRegionAvail()
+    local colW = (avail.x - 14) / 2
+    column('##aa_l', colW, function()
+        SectionHeader('Anti-Aim')
+        Check('##aa_en', 'Enable', S.aa_enable)
+        imgui.Text('Mode')
+        Combo('##aa_mode', aaModeItems, S.aa_mode)
+        Slider('##aa_spd', 'Spin speed', S.aa_speed, 1, 90, false, '%d')
+        Slider('##aa_jit', 'Jitter range', S.aa_jitter, 0, 180, false, '%d')
+    end)
+    imgui.SameLine(0, 14)
+    column('##aa_r', colW, function()
+        SectionHeader('Conditions')
+        Check('##aa_na', 'Disable while aiming', S.aa_noaim)
+        imgui.Text('Toggle key')
+        Combo('##aa_key', keyNames, S.aa_key)
+    end)
 end
 
 -- Страница Aimbot (как на скриншоте — две колонки)
@@ -563,6 +602,8 @@ imgui.OnFrame(function() return menu[0] end, function()
     else
         if pageName == 'Aimbot' then
             pageAimbot()
+        elseif pageName == 'Anti-Aim' then
+            pageAntiAim()
         else
             pageSimple(pageName)
         end
@@ -571,6 +612,35 @@ imgui.OnFrame(function() return menu[0] end, function()
 
     imgui.End()
 end)
+
+-- ===================== ANTI-AIM =====================
+local aaAngle, aaFlip = 0, false
+
+local function aaHeading(base)
+    local m = S.aa_mode[0]
+    if m == 0 then                                   -- Spin
+        aaAngle = (aaAngle + S.aa_speed[0]) % 360
+        return aaAngle
+    elseif m == 1 then                               -- Jitter (вокруг "спиной")
+        aaFlip = not aaFlip
+        local j = aaFlip and S.aa_jitter[0] or -S.aa_jitter[0]
+        return (base + 180 + j) % 360
+    elseif m == 2 then                               -- Random
+        return math.random(0, 359)
+    end
+    return (base + 180) % 360                        -- Backward
+end
+
+function sampev.onSendPlayerSync(data)
+    if not S.aa_enable[0] then return end
+    if S.aa_noaim[0] and isKeyDown(0x02) then return end
+    local h = math.rad(aaHeading(getCharHeading(PLAYER_PED)))
+    -- поворот вокруг оси Z: (w, x, y, z)
+    data.quaternion[0] = math.cos(h / 2)
+    data.quaternion[1] = 0
+    data.quaternion[2] = 0
+    data.quaternion[3] = math.sin(h / 2)
+end
 
 -- ===================== КОНФИГ =====================
 local function saveConfig()
@@ -631,6 +701,14 @@ function main()
             and not sampIsChatInputActive() and not sampIsDialogActive()
             and not isSampfuncsConsoleActive() then
             menu[0] = not menu[0]
+        end
+
+        local aak = keyCodes[S.aa_key[0] + 1]
+        if aak and aak ~= 0 and isKeyJustPressed(aak)
+            and not sampIsChatInputActive() and not sampIsDialogActive()
+            and not isSampfuncsConsoleActive() then
+            S.aa_enable[0] = not S.aa_enable[0]
+            chat('Anti-Aim: ' .. (S.aa_enable[0] and '{3DE07A}ON' or '{E03D3D}OFF'))
         end
     end
 end
