@@ -1,14 +1,19 @@
 --[[
     rage-mod — MoonLoader скрипт для SA-MP
-    Активация: /ragemd (или клавиша, выбранная в меню)
-    Стиль меню вдохновлён интерфейсами популярных CS2-читов (тёмная тема, боковая панель,
-    группбоксы, тумблеры, акцентный цвет, оверлей-виджеты: watermark, keybind-list и т.д.)
+    Меню в стиле MIDNIGHT (CS2-софт): шапка с вкладками, боковая панель,
+    карточки-секции, кастомные виджеты (чекбоксы, выпадающие списки,
+    слайдеры с кольцевым бегунком).
+
+    ВАЖНО: боевые разделы (Aimbot/Triggerbot) здесь — ТОЛЬКО интерфейс.
+    Элементы хранят значения в конфиге и НЕ подключены к наведению/стрельбе.
+
+    Активация: команда /ragemd или клавиша из настроек.
     Зависимости: MoonLoader 0.26+, SAMPFUNCS, mimgui
 ]]
 
 script_name('rage-mod')
 script_author('rage-mod')
-script_version('1.0.0')
+script_version('2.0.0')
 
 local imgui    = require 'mimgui'
 local encoding = require 'encoding'
@@ -20,604 +25,612 @@ local new = imgui.new
 
 local CFG_FILE = 'rage-mod.ini'
 
--- ===================== НАСТРОЙКИ =====================
+-- ===================== СОСТОЯНИЕ =====================
 local menu = new.bool(false)
-local tab  = 1
+local topTab  = new.int(1)        -- 0 = GLOBALS, 1 = WEAPONS
+local sidePage = 1                -- выбранный пункт сайдбара (индекс)
 
-local S = {
-    -- Мир
-    time_on     = new.bool(false), time_h = new.int(12), time_m = new.int(0),
-    weather_on  = new.bool(false), weather_idx = new.int(0),
-    -- Виджеты
-    wm_on       = new.bool(true),  wm_nick = new.bool(true), wm_fps = new.bool(true),
-    wm_ping     = new.bool(true),  wm_time = new.bool(true),
-    info_on     = new.bool(false), info_hp = new.bool(true), info_arm = new.bool(true),
-    info_pos    = new.bool(true),  info_speed = new.bool(true),
-    flist_on    = new.bool(true),
-    clock_on    = new.bool(false), clock_fmt = new.int(0),
-    notif_on    = new.bool(true),
-    widget_alpha= new.float(0.85),
-    -- Меню
-    rounding    = new.float(6.0),
-    menu_alpha  = new.float(0.97),
-    anim        = new.bool(true),
-    menu_key    = new.int(1),
+-- Палитра MIDNIGHT
+local COL = {
+    windowBg   = {0.078, 0.082, 0.094},
+    panelBg    = {0.102, 0.107, 0.121},
+    sidebarBg  = {0.086, 0.090, 0.102},
+    fieldBg    = {0.145, 0.153, 0.172},
+    fieldHover = {0.176, 0.184, 0.204},
+    track      = {0.223, 0.235, 0.262},
+    border     = {0.160, 0.168, 0.188},
+    text       = {0.820, 0.835, 0.862},
+    textDim    = {0.420, 0.445, 0.498},
+    textHead   = {0.520, 0.545, 0.600},
+    accent     = {0.243, 0.608, 0.882},
 }
-local accent  = new.float[4](0.0, 0.63, 1.0, 1.0)
-local wm_text = new.char[64]('rage-mod')
 
-local weatherNames = { 'Ясно', 'Облачно', 'Дождь', 'Туман', 'Песчаная буря', 'Зелёный смог' }
-local weatherIds   = { 0, 4, 8, 9, 19, 20 }
-local weatherItems = new['const char*'][#weatherNames](weatherNames)
+-- Оружие (для списка в разделе Weapon)
+local weapons = { 'AWP', 'AK-47', 'M4A4', 'M4A1-S', 'Deagle', 'Glock-18', 'USP-S', 'AUG', 'SG 553' }
+local weaponIdx = new.int(0)
+
+-- Наборы хитбоксов (мультивыбор)
+local hitboxNames = { 'Head', 'Chest', 'Stomach', 'Pelvis', 'Arms', 'Legs' }
+
+-- ===================== НАСТРОЙКИ (ЗАГЛУШКИ) =====================
+local S = {
+    -- Aimbot (интерфейс)
+    aim_enable   = new.bool(true),
+    aim_hb       = { new.bool(true), new.bool(true), new.bool(true), new.bool(false), new.bool(false), new.bool(false) },
+    aim_ignjump  = new.bool(false),
+    aim_fovtype  = new.int(0),     -- Static / Dynamic
+    aim_smooth   = new.int(0),     -- Decrease / Static / Increase
+    aim_autofire = new.int(0),     -- Auto-fire hitchance
+    aim_fov      = new.float(2.3), -- Settings: FOV
+
+    -- Triggerbot (интерфейс)
+    tb_enable    = new.bool(true),
+    tb_hb        = { new.bool(true), new.bool(true), new.bool(true), new.bool(false), new.bool(false), new.bool(false) },
+    tb_type      = new.int(0),     -- Normal / Burst
+    tb_onlyzoom  = new.bool(false),
+    tb_hitchance = new.int(73),
+    tb_delaybf   = new.float(0.0),
+    tb_delayaf   = new.float(0.0),
+    tb_autowall  = new.bool(false),
+    tb_mindmg    = new.int(100),
+    tb_delaytype = new.int(0),     -- Delays: Type
+
+    -- Прочее
+    menu_key     = new.int(1),
+}
+
+local hbRefs = { aim = S.aim_hb, tb = S.tb_hb }
+
+local fovTypeItems    = { 'Static', 'Dynamic' }
+local smoothTypeItems = { 'Decrease', 'Static', 'Increase' }
+local tbTypeItems     = { 'Normal', 'Burst' }
+local delayTypeItems  = { 'Static', 'Random' }
 
 local keyNames = { 'Нет', 'Insert', 'Delete', 'Home', 'End', 'F2', 'F3' }
 local keyCodes = { 0, 0x2D, 0x2E, 0x24, 0x23, 0x71, 0x72 }
 local keyItems = new['const char*'][#keyNames](keyNames)
 
-local tabs = {
-    { name = 'Мир',     desc = 'Клиентское время и погода' },
-    { name = 'Виджеты', desc = 'Оверлей: watermark, инфо-панель, список функций' },
-    { name = 'Меню',    desc = 'Внешний вид интерфейса' },
-    { name = 'Разное',  desc = 'Полезные утилиты' },
-    { name = 'Конфиг',  desc = 'Сохранение и загрузка настроек' },
+-- Сайдбар: группы и пункты
+local sidebar = {
+    { group = 'Combat' },
+    { page = 'Aimbot',  icon = 'aim' },
+    { group = 'Visuals' },
+    { page = 'Players', icon = 'ply' },
+    { page = 'Items',   icon = 'itm' },
+    { page = 'View',    icon = 'eye' },
+    { page = 'Hud',     icon = 'hud' },
+    { group = 'Misc' },
+    { page = 'Main',    icon = 'main' },
+    { page = 'Cloud',   icon = 'cloud' },
 }
 
-local font_big, font_main
-local notifs = {}
-local anims  = {}
+local font_logo, font_main, font_big
 
 -- ===================== УТИЛИТЫ =====================
 local function chat(text)
-    sampAddChatMessage(u8:decode('{00A0FF}[rage-mod]{FFFFFF} ' .. text), -1)
+    sampAddChatMessage(u8:decode('{3D9BE0}[rage-mod]{FFFFFF} ' .. text), -1)
 end
 
-local function notify(text)
-    if S.notif_on[0] then table.insert(notifs, { text = text, t = os.clock() }) end
+local function V4(t, a) return imgui.ImVec4(t[1], t[2], t[3], a or 1) end
+local function U32(t, a) return imgui.GetColorU32Vec4(imgui.ImVec4(t[1], t[2], t[3], a or 1)) end
+local function accV(a) return V4(COL.accent, a) end
+local function accU(a) return U32(COL.accent, a) end
+
+local function clamp(v, a, b) return math.max(a, math.min(b, v)) end
+
+-- Текст выбранных хитбоксов ("Head, Chest, Stomach")
+local function hbText(refs)
+    local t = {}
+    for i, b in ipairs(refs) do if b[0] then t[#t + 1] = hitboxNames[i] end end
+    if #t == 0 then return 'None' end
+    return table.concat(t, ', ')
 end
 
-local function V4(r, g, b, a) return imgui.ImVec4(r, g, b, a or 1) end
-local function U32(r, g, b, a) return imgui.GetColorU32Vec4(imgui.ImVec4(r, g, b, a or 1)) end
-local function accV(a) return V4(accent[0], accent[1], accent[2], a or 1) end
-local function accU(a) return U32(accent[0], accent[1], accent[2], a or 1) end
-local function stripId(label) return (label:gsub('##.*$', '')) end
-
+-- ===================== ТЕМА =====================
 local function applyTheme()
     local st = imgui.GetStyle()
     local c, col = st.Colors, imgui.Col
-    local r = S.rounding[0]
-    st.WindowRounding, st.ChildRounding, st.PopupRounding = r, r, r
-    st.FrameRounding, st.GrabRounding, st.ScrollbarRounding = r * 0.6, r * 0.6, r
-    st.WindowBorderSize, st.ChildBorderSize, st.FrameBorderSize = 1, 1, 0
-    st.WindowPadding = imgui.ImVec2(10, 10)
-    st.FramePadding  = imgui.ImVec2(6, 4)
-    st.ItemSpacing   = imgui.ImVec2(8, 7)
-    st.GrabMinSize   = 8
-    st.ScrollbarSize = 8
+    st.WindowRounding   = 10
+    st.ChildRounding    = 6
+    st.PopupRounding    = 6
+    st.FrameRounding    = 4
+    st.GrabRounding     = 4
+    st.ScrollbarRounding = 6
+    st.WindowBorderSize = 0
+    st.ChildBorderSize  = 0
+    st.FrameBorderSize  = 0
+    st.PopupBorderSize  = 1
+    st.WindowPadding    = imgui.ImVec2(0, 0)
+    st.FramePadding     = imgui.ImVec2(8, 5)
+    st.ItemSpacing      = imgui.ImVec2(8, 8)
+    st.ScrollbarSize    = 7
+    st.GrabMinSize      = 8
 
-    c[col.Text]             = V4(0.92, 0.93, 0.96)
-    c[col.TextDisabled]     = V4(0.48, 0.52, 0.60)
-    c[col.WindowBg]         = V4(0.035, 0.045, 0.075)
-    c[col.ChildBg]          = V4(0.055, 0.065, 0.105)
-    c[col.PopupBg]          = V4(0.05, 0.06, 0.10, 0.98)
-    c[col.Border]           = V4(0.11, 0.13, 0.19)
-    c[col.BorderShadow]     = V4(0, 0, 0, 0)
-    c[col.FrameBg]          = V4(0.09, 0.10, 0.16)
-    c[col.FrameBgHovered]   = V4(0.12, 0.14, 0.21)
-    c[col.FrameBgActive]    = V4(0.14, 0.16, 0.24)
-    c[col.TitleBg]          = V4(0.04, 0.05, 0.08)
-    c[col.TitleBgActive]    = V4(0.04, 0.05, 0.08)
-    c[col.ScrollbarBg]      = V4(0, 0, 0, 0)
-    c[col.ScrollbarGrab]    = V4(0.15, 0.17, 0.25)
+    c[col.Text]            = V4(COL.text)
+    c[col.TextDisabled]    = V4(COL.textDim)
+    c[col.WindowBg]        = V4(COL.windowBg)
+    c[col.ChildBg]         = V4(COL.panelBg, 0)
+    c[col.PopupBg]         = V4(COL.fieldBg, 0.99)
+    c[col.Border]          = V4(COL.border)
+    c[col.FrameBg]         = V4(COL.fieldBg)
+    c[col.FrameBgHovered]  = V4(COL.fieldHover)
+    c[col.FrameBgActive]   = V4(COL.fieldHover)
+    c[col.CheckMark]       = V4({1, 1, 1})
+    c[col.SliderGrab]      = accV()
+    c[col.SliderGrabActive]= accV()
+    c[col.Button]          = V4(COL.fieldBg)
+    c[col.ButtonHovered]   = V4(COL.fieldHover)
+    c[col.ButtonActive]    = accV(0.8)
+    c[col.Header]          = accV(0.25)
+    c[col.HeaderHovered]   = V4(COL.fieldHover)
+    c[col.HeaderActive]    = accV(0.4)
+    c[col.Separator]       = V4(COL.border)
+    c[col.ScrollbarBg]     = V4(COL.windowBg, 0)
+    c[col.ScrollbarGrab]   = V4(COL.track)
     c[col.ScrollbarGrabHovered] = accV(0.6)
     c[col.ScrollbarGrabActive]  = accV()
-    c[col.CheckMark]        = accV()
-    c[col.SliderGrab]       = accV()
-    c[col.SliderGrabActive] = accV(0.8)
-    c[col.Button]           = V4(0.09, 0.10, 0.16)
-    c[col.ButtonHovered]    = accV(0.55)
-    c[col.ButtonActive]     = accV(0.85)
-    c[col.Header]           = accV(0.35)
-    c[col.HeaderHovered]    = accV(0.5)
-    c[col.HeaderActive]     = accV(0.7)
-    c[col.Separator]        = V4(0.11, 0.13, 0.19)
-    c[col.PlotHistogram]    = accV()
-    c[col.TextSelectedBg]   = accV(0.35)
 end
 
 -- ===================== КАСТОМНЫЕ ВИДЖЕТЫ =====================
--- Тумблер (toggle switch) с анимацией
-local function Toggle(label, bool)
+
+-- Заголовок секции (серый, с тонкой линией-разделителем)
+local function SectionHeader(title)
+    imgui.Dummy(imgui.ImVec2(0, 2))
+    imgui.TextColored(V4(COL.textHead), title)
+    imgui.Dummy(imgui.ImVec2(0, 2))
+end
+
+-- Чекбокс с акцентной заливкой и подписью справа
+local function Check(id, label, bool)
     local dl = imgui.GetWindowDrawList()
     local p  = imgui.GetCursorScreenPos()
-    local h  = 16
-    local w  = 30
-    local clicked = imgui.InvisibleButton(label, imgui.ImVec2(w, h))
+    local sz = 16
+    local clicked = imgui.InvisibleButton(id, imgui.ImVec2(sz, sz))
     if clicked then bool[0] = not bool[0] end
-    local target = bool[0] and 1 or 0
-    local t = anims[label] or target
-    if S.anim[0] then
-        t = t + (target - t) * math.min(1, imgui.GetIO().DeltaTime * 14)
+    local hov = imgui.IsItemHovered()
+    if bool[0] then
+        dl:AddRectFilled(p, imgui.ImVec2(p.x + sz, p.y + sz), accU(), 4)
+        -- галочка
+        dl:AddLine(imgui.ImVec2(p.x + 4, p.y + 8), imgui.ImVec2(p.x + 7, p.y + 11.5), U32({1,1,1}), 1.8)
+        dl:AddLine(imgui.ImVec2(p.x + 7, p.y + 11.5), imgui.ImVec2(p.x + 12.5, p.y + 4.5), U32({1,1,1}), 1.8)
     else
-        t = target
+        dl:AddRectFilled(p, imgui.ImVec2(p.x + sz, p.y + sz), U32(hov and COL.fieldHover or COL.fieldBg), 4)
+        dl:AddRect(p, imgui.ImVec2(p.x + sz, p.y + sz), U32(COL.border), 4)
     end
-    anims[label] = t
-    local bg = imgui.ImVec4(
-        0.12 + (accent[0] - 0.12) * t,
-        0.14 + (accent[1] - 0.14) * t,
-        0.21 + (accent[2] - 0.21) * t, 1)
-    dl:AddRectFilled(p, imgui.ImVec2(p.x + w, p.y + h), imgui.GetColorU32Vec4(bg), h * 0.5)
-    local rad = h * 0.5 - 3
-    local cx = p.x + rad + 3 + (w - rad * 2 - 6) * t
-    dl:AddCircleFilled(imgui.ImVec2(cx, p.y + h * 0.5), rad, U32(1, 1, 1, 0.95), 16)
-    imgui.SameLine()
-    imgui.SetCursorPosY(imgui.GetCursorPosY() - 1)
-    imgui.Text(stripId(label))
+    if label and label ~= '' then
+        imgui.SameLine(0, 8)
+        imgui.SetCursorPosY(imgui.GetCursorPosY() - 1)
+        imgui.Text(label)
+    end
     return clicked
 end
 
--- Подсказка "(?)"
-local function Hint(text)
+-- Выпадающий список (одиночный выбор), вид — тёмное поле с текстом и шевроном
+local function fieldBox(id, text, h)
+    h = h or 28
+    local dl = imgui.GetWindowDrawList()
+    local p  = imgui.GetCursorScreenPos()
+    local w  = imgui.GetContentRegionAvail().x
+    local clicked = imgui.InvisibleButton(id, imgui.ImVec2(w, h))
+    local hov = imgui.IsItemHovered()
+    dl:AddRectFilled(p, imgui.ImVec2(p.x + w, p.y + h), U32(hov and COL.fieldHover or COL.fieldBg), 4)
+    local ts = imgui.CalcTextSize(text)
+    dl:AddText(imgui.ImVec2(p.x + 10, p.y + (h - ts.y) * 0.5), U32(COL.text), text)
+    -- шеврон
+    local cx, cy = p.x + w - 16, p.y + h * 0.5
+    dl:AddLine(imgui.ImVec2(cx, cy - 2), imgui.ImVec2(cx + 4, cy + 2), U32(COL.textDim), 1.4)
+    dl:AddLine(imgui.ImVec2(cx + 4, cy + 2), imgui.ImVec2(cx + 8, cy - 2), U32(COL.textDim), 1.4)
+    return clicked, p, w, h
+end
+
+local function Combo(id, items, idxptr)
+    local clicked = fieldBox(id, items[idxptr[0] + 1])
+    if clicked then imgui.OpenPopup(id .. '_pp') end
+    imgui.PushStyleVarVec2(imgui.StyleVar.WindowPadding, imgui.ImVec2(6, 6))
+    if imgui.BeginPopup(id .. '_pp') then
+        for i, it in ipairs(items) do
+            if imgui.Selectable(it .. '##' .. id .. i, idxptr[0] == i - 1) then idxptr[0] = i - 1 end
+        end
+        imgui.EndPopup()
+    end
+    imgui.PopStyleVar()
+end
+
+-- Мультивыбор хитбоксов
+local function MultiHitbox(id, refs)
+    local clicked = fieldBox(id, hbText(refs))
+    if clicked then imgui.OpenPopup(id .. '_pp') end
+    imgui.PushStyleVarVec2(imgui.StyleVar.WindowPadding, imgui.ImVec2(8, 8))
+    if imgui.BeginPopup(id .. '_pp') then
+        for i, name in ipairs(hitboxNames) do
+            Check(id .. '_hb' .. i, name, refs[i])
+        end
+        imgui.EndPopup()
+    end
+    imgui.PopStyleVar()
+end
+
+-- Слайдер: подпись слева, значение справа, трек с кольцевым бегунком
+local function Slider(id, label, ptr, vmin, vmax, isFloat, fmt)
+    imgui.Text(label)
+    local v = ptr[0]
+    local txt = string.format(fmt, v)
+    local tw = imgui.CalcTextSize(txt)
     imgui.SameLine()
-    imgui.TextDisabled('(?)')
-    if imgui.IsItemHovered() then
-        imgui.BeginTooltip()
-        imgui.Text(text)
-        imgui.EndTooltip()
+    local avail = imgui.GetContentRegionAvail().x
+    imgui.SetCursorPosX(imgui.GetCursorPosX() + avail - tw.x)
+    imgui.TextColored(V4({0.92, 0.93, 0.95}), txt)
+
+    local dl = imgui.GetWindowDrawList()
+    local p  = imgui.GetCursorScreenPos()
+    local w  = imgui.GetContentRegionAvail().x
+    imgui.InvisibleButton(id, imgui.ImVec2(w, 14))
+    if imgui.IsItemActive() then
+        local mx = imgui.GetMousePos().x
+        local t  = clamp((mx - p.x) / w, 0, 1)
+        local nv = vmin + (vmax - vmin) * t
+        if not isFloat then nv = math.floor(nv + 0.5) end
+        ptr[0] = nv
+    end
+    local t = clamp((ptr[0] - vmin) / (vmax - vmin), 0, 1)
+    local ly = p.y + 7
+    local kx = p.x + w * t
+    dl:AddLine(imgui.ImVec2(p.x, ly), imgui.ImVec2(p.x + w, ly), U32(COL.track), 3)
+    dl:AddLine(imgui.ImVec2(p.x, ly), imgui.ImVec2(kx, ly), accU(), 3)
+    dl:AddCircleFilled(imgui.ImVec2(kx, ly), 6, accU(), 20)
+    dl:AddCircleFilled(imgui.ImVec2(kx, ly), 3, U32({1, 1, 1}), 16)
+    imgui.Dummy(imgui.ImVec2(0, 2))
+end
+
+-- Иконка пункта сайдбара (простые фигуры на drawlist)
+local function drawSideIcon(dl, x, y, kind, col)
+    local s = 7
+    if kind == 'aim' then
+        dl:AddCircle(imgui.ImVec2(x + s, y + s), 6, col, 16, 1.6)
+        dl:AddLine(imgui.ImVec2(x + s, y - 1), imgui.ImVec2(x + s, y + 3), col, 1.6)
+        dl:AddLine(imgui.ImVec2(x + s, y + 2 * s + 1), imgui.ImVec2(x + s, y + 2 * s - 3), col, 1.6)
+        dl:AddLine(imgui.ImVec2(x - 1, y + s), imgui.ImVec2(x + 3, y + s), col, 1.6)
+        dl:AddLine(imgui.ImVec2(x + 2 * s + 1, y + s), imgui.ImVec2(x + 2 * s - 3, y + s), col, 1.6)
+    elseif kind == 'ply' then
+        dl:AddCircleFilled(imgui.ImVec2(x + s, y + 4), 4, col, 16)
+        dl:AddRectFilled(imgui.ImVec2(x + 1, y + 9), imgui.ImVec2(x + 2 * s + 1, y + 2 * s + 2), col, 3)
+    elseif kind == 'itm' then
+        dl:AddRect(imgui.ImVec2(x, y + 2), imgui.ImVec2(x + 2 * s + 2, y + 2 * s), col, 2, 0, 1.6)
+        dl:AddLine(imgui.ImVec2(x, y + 6), imgui.ImVec2(x + 2 * s + 2, y + 6), col, 1.6)
+    elseif kind == 'eye' then
+        dl:AddCircle(imgui.ImVec2(x + s, y + s), 6, col, 16, 1.6)
+        dl:AddCircleFilled(imgui.ImVec2(x + s, y + s), 2.2, col, 12)
+    elseif kind == 'hud' then
+        dl:AddRect(imgui.ImVec2(x, y + 1), imgui.ImVec2(x + 2 * s + 2, y + 2 * s + 1), col, 2, 0, 1.6)
+        dl:AddLine(imgui.ImVec2(x + s + 1, y + 1), imgui.ImVec2(x + s + 1, y + 2 * s + 1), col, 1.4)
+    elseif kind == 'main' then
+        dl:AddRectFilled(imgui.ImVec2(x, y + 1), imgui.ImVec2(x + 5, y + 6), col, 1)
+        dl:AddRectFilled(imgui.ImVec2(x + 8, y + 1), imgui.ImVec2(x + 13, y + 6), col, 1)
+        dl:AddRectFilled(imgui.ImVec2(x, y + 9), imgui.ImVec2(x + 5, y + 14), col, 1)
+        dl:AddRectFilled(imgui.ImVec2(x + 8, y + 9), imgui.ImVec2(x + 13, y + 14), col, 1)
+    elseif kind == 'cloud' then
+        dl:AddCircleFilled(imgui.ImVec2(x + 4, y + 9), 4, col, 14)
+        dl:AddCircleFilled(imgui.ImVec2(x + 10, y + 8), 5, col, 14)
+        dl:AddRectFilled(imgui.ImVec2(x + 3, y + 9), imgui.ImVec2(x + 13, y + 13), col, 1)
     end
 end
 
--- Группбокс с заголовком
-local function BeginGroup(title, size)
-    imgui.BeginChild('##grp_' .. title, size, true)
-    imgui.TextColored(accV(), title)
-    local dl = imgui.GetWindowDrawList()
-    local p = imgui.GetCursorScreenPos()
-    local w = imgui.GetContentRegionAvail().x
-    dl:AddRectFilled(p, imgui.ImVec2(p.x + w, p.y + 1), U32(0.11, 0.13, 0.19))
-    imgui.Dummy(imgui.ImVec2(0, 3))
-    imgui.PushItemWidth(-1)
-end
+-- ===================== СТРАНИЦЫ КОНТЕНТА =====================
 
-local function EndGroup()
+-- Колонка-обёртка
+local function column(id, w, fn)
+    imgui.BeginChild(id, imgui.ImVec2(w, 0), false)
+    imgui.PushItemWidth(-1)
+    fn()
     imgui.PopItemWidth()
     imgui.EndChild()
 end
 
--- Кнопка вкладки в боковой панели
-local function TabButton(label, idx)
-    local active = tab == idx
-    local dl = imgui.GetWindowDrawList()
-    local p  = imgui.GetCursorScreenPos()
-    local w  = imgui.GetContentRegionAvail().x
-    local h  = 32
-    if imgui.InvisibleButton('##tab' .. idx, imgui.ImVec2(w, h)) then tab = idx end
-    local hovered = imgui.IsItemHovered()
-    if active then
-        dl:AddRectFilled(p, imgui.ImVec2(p.x + w, p.y + h), accU(0.14), 5)
-        dl:AddRectFilled(p, imgui.ImVec2(p.x + 3, p.y + h), accU(), 2)
-    elseif hovered then
-        dl:AddRectFilled(p, imgui.ImVec2(p.x + w, p.y + h), U32(1, 1, 1, 0.04), 5)
-    end
-    local ts = imgui.CalcTextSize(label)
-    local col = active and accU() or (hovered and U32(0.92, 0.93, 0.96) or U32(0.55, 0.58, 0.66))
-    dl:AddText(imgui.ImVec2(p.x + 16, p.y + (h - ts.y) * 0.5), col, label)
+-- Левая колонка WEAPONS: Weapon + Aimbot + Settings
+local function colWeaponLeft()
+    SectionHeader('Weapon')
+    Combo('##weapon', weapons, weaponIdx)
+    imgui.Dummy(imgui.ImVec2(0, 6))
+
+    SectionHeader('Aimbot')
+    Check('##aim_en', 'Enable', S.aim_enable)
+    imgui.Text('Hitboxes')
+    MultiHitbox('##aim_hb', S.aim_hb)
+    Check('##aim_ij', 'Ignore jump', S.aim_ignjump)
+    imgui.Text('Fov type')
+    Combo('##aim_fovtype', fovTypeItems, S.aim_fovtype)
+    imgui.Text('Smooth type')
+    Combo('##aim_smooth', smoothTypeItems, S.aim_smooth)
+    Slider('##aim_af', 'Auto-fire hitchance', S.aim_autofire, 0, 100, false, '%d')
+    imgui.Dummy(imgui.ImVec2(0, 6))
+
+    SectionHeader('Settings')
+    Slider('##aim_fov', 'FOV', S.aim_fov, 0, 10, true, '%.1f')
 end
 
--- Широкая акцентная кнопка
-local function AccentButton(label, w)
-    imgui.PushStyleColor(imgui.Col.Button, accV(0.8))
-    imgui.PushStyleColor(imgui.Col.ButtonHovered, accV(0.95))
-    imgui.PushStyleColor(imgui.Col.ButtonActive, accV(0.65))
-    local r = imgui.Button(label, imgui.ImVec2(w or -1, 26))
-    imgui.PopStyleColor(3)
-    return r
+-- Правая колонка WEAPONS: Triggerbot + Delays
+local function colWeaponRight()
+    SectionHeader('Triggerbot')
+    Check('##tb_en', 'Enable', S.tb_enable)
+    imgui.Text('Hitboxes')
+    MultiHitbox('##tb_hb', S.tb_hb)
+    imgui.Text('Type')
+    Combo('##tb_type', tbTypeItems, S.tb_type)
+    Check('##tb_oz', 'Only zoom', S.tb_onlyzoom)
+    Slider('##tb_hc', 'Hitchance', S.tb_hitchance, 0, 100, false, '%d')
+    Slider('##tb_dbf', 'Delay before shot', S.tb_delaybf, 0, 1, true, '%.3f')
+    Slider('##tb_daf', 'Delay after shot', S.tb_delayaf, 0, 1, true, '%.3f')
+    Check('##tb_aw', 'Auto wall', S.tb_autowall)
+    Slider('##tb_md', 'Min damage', S.tb_mindmg, 0, 100, false, '%d')
+    imgui.Dummy(imgui.ImVec2(0, 6))
+
+    SectionHeader('Delays')
+    imgui.Text('Type')
+    imgui.SameLine()
+    imgui.TextDisabled('(?)')
+    if imgui.IsItemHovered() then
+        imgui.BeginTooltip(); imgui.Text('Shot delay behaviour'); imgui.EndTooltip()
+    end
+    Combo('##tb_dtype', delayTypeItems, S.tb_delaytype)
 end
+
+-- Страница Aimbot (как на скриншоте — две колонки)
+local function pageAimbot()
+    local avail = imgui.GetContentRegionAvail()
+    local colW = (avail.x - 14) / 2
+    column('##wcol_l', colW, colWeaponLeft)
+    imgui.SameLine(0, 14)
+    column('##wcol_r', colW, colWeaponRight)
+end
+
+-- Заглушки прочих страниц
+local function placeholder(title, lines)
+    SectionHeader(title)
+    for _, l in ipairs(lines) do imgui.TextDisabled(l) end
+end
+
+local function pageSimple(name)
+    local avail = imgui.GetContentRegionAvail()
+    local colW = (avail.x - 14) / 2
+    if name == 'Players' then
+        column('##p_l', colW, function()
+            placeholder('ESP', { 'Box', 'Skeleton', 'Name', 'Health' })
+        end)
+        imgui.SameLine(0, 14)
+        column('##p_r', colW, function()
+            placeholder('Colors', { 'Visible', 'Hidden' })
+        end)
+    elseif name == 'Items' then
+        column('##i_l', colW, function()
+            placeholder('World', { 'Dropped weapons', 'Grenades' })
+        end)
+        imgui.SameLine(0, 14)
+        column('##i_r', colW, function()
+            placeholder('Filter', { 'Distance' })
+        end)
+    elseif name == 'View' then
+        column('##v_l', colW, function()
+            placeholder('Camera', { 'FOV', 'Thirdperson' })
+        end)
+        imgui.SameLine(0, 14)
+        column('##v_r', colW, function()
+            placeholder('World', { 'Nightmode' })
+        end)
+    elseif name == 'Hud' then
+        column('##h_l', colW, function()
+            placeholder('Watermark', { 'Enable', 'Position' })
+        end)
+        imgui.SameLine(0, 14)
+        column('##h_r', colW, function()
+            placeholder('Keybinds', { 'Show list' })
+        end)
+    elseif name == 'Main' then
+        column('##m_l', colW, function()
+            placeholder('Menu', { 'Accent color', 'Rounding' })
+            imgui.Text('Open key')
+            Combo('##menukey', keyNames, S.menu_key)
+        end)
+        imgui.SameLine(0, 14)
+        column('##m_r', colW, function()
+            placeholder('Config', { 'Save', 'Load', 'Reset' })
+        end)
+    elseif name == 'Cloud' then
+        column('##c_l', colW, function()
+            placeholder('Configs', { 'No cloud configs' })
+        end)
+        imgui.SameLine(0, 14)
+        column('##c_r', colW, function()
+            placeholder('Account', { 'Not logged in' })
+        end)
+    end
+end
+
+-- GLOBALS вкладка
+local function pageGlobals()
+    local avail = imgui.GetContentRegionAvail()
+    local colW = (avail.x - 14) / 2
+    column('##g_l', colW, function()
+        placeholder('General', { 'Master switch', 'Panic key' })
+    end)
+    imgui.SameLine(0, 14)
+    column('##g_r', colW, function()
+        placeholder('Profiles', { 'Active profile' })
+    end)
+end
+
+-- ===================== РЕНДЕР МЕНЮ =====================
+local HEADER_H  = 46
+local SIDEBAR_W = 168
+
+imgui.OnFrame(function() return menu[0] end, function()
+    local sw, sh = getScreenResolution()
+    imgui.SetNextWindowPos(imgui.ImVec2(sw / 2, sh / 2), imgui.Cond.FirstUseEver, imgui.ImVec2(0.5, 0.5))
+    imgui.SetNextWindowSize(imgui.ImVec2(700, 470), imgui.Cond.Always)
+
+    imgui.Begin('##midnight', menu, bit.bor(
+        imgui.WindowFlags.NoTitleBar, imgui.WindowFlags.NoResize,
+        imgui.WindowFlags.NoCollapse, imgui.WindowFlags.NoScrollbar,
+        imgui.WindowFlags.NoScrollWithMouse))
+
+    local dl = imgui.GetWindowDrawList()
+    local wp = imgui.GetWindowPos()
+    local ws = imgui.GetWindowSize()
+
+    -- ===== Шапка =====
+    -- логотип: треугольник + MIDNIGHT
+    local lx, ly = wp.x + 22, wp.y + 16
+    dl:AddTriangleFilled(
+        imgui.ImVec2(lx + 7, ly),
+        imgui.ImVec2(lx + 14, ly + 13),
+        imgui.ImVec2(lx, ly + 13), U32(COL.text))
+    dl:AddTriangleFilled(
+        imgui.ImVec2(lx + 7, ly + 4),
+        imgui.ImVec2(lx + 11, ly + 13),
+        imgui.ImVec2(lx + 3, ly + 13), U32(COL.windowBg))
+    imgui.PushFont(font_main)
+    dl:AddText(imgui.ImVec2(lx + 24, ly + 1), U32(COL.text), 'MIDNIGHT')
+    imgui.PopFont()
+
+    -- верхние вкладки GLOBALS / WEAPONS
+    local tabNames = { 'GLOBALS', 'WEAPONS' }
+    local tx = wp.x + 170
+    for i = 1, 2 do
+        local name = tabNames[i]
+        local tsz = imgui.CalcTextSize(name)
+        imgui.SetCursorScreenPos(imgui.ImVec2(tx, wp.y + 14))
+        if imgui.InvisibleButton('##tt' .. i, imgui.ImVec2(tsz.x + 6, 22)) then topTab[0] = i - 1 end
+        local active = topTab[0] == i - 1
+        local hov = imgui.IsItemHovered()
+        local col = active and U32(COL.text) or (hov and U32(COL.text) or U32(COL.textDim))
+        dl:AddText(imgui.ImVec2(tx + 3, wp.y + 17), col, name)
+        if active then
+            dl:AddRectFilled(imgui.ImVec2(tx, wp.y + HEADER_H - 2),
+                imgui.ImVec2(tx + tsz.x + 6, wp.y + HEADER_H), accU(), 1)
+        end
+        tx = tx + tsz.x + 34
+    end
+
+    -- иконки справа: поиск + шестерёнка
+    local gx = wp.x + ws.x - 30
+    dl:AddCircle(imgui.ImVec2(gx, wp.y + 22), 3.2, U32(COL.textDim), 14, 1.6)
+    local sx = wp.x + ws.x - 58
+    dl:AddCircle(imgui.ImVec2(sx, wp.y + 20), 4, U32(COL.textDim), 14, 1.6)
+    dl:AddLine(imgui.ImVec2(sx + 3, wp.y + 23), imgui.ImVec2(sx + 7, wp.y + 27), U32(COL.textDim), 1.6)
+
+    -- линия под шапкой
+    dl:AddLine(imgui.ImVec2(wp.x, wp.y + HEADER_H), imgui.ImVec2(wp.x + ws.x, wp.y + HEADER_H), U32(COL.border), 1)
+
+    -- ===== Сайдбар =====
+    dl:AddRectFilled(imgui.ImVec2(wp.x, wp.y + HEADER_H),
+        imgui.ImVec2(wp.x + SIDEBAR_W, wp.y + ws.y), U32(COL.sidebarBg), 0)
+    dl:AddLine(imgui.ImVec2(wp.x + SIDEBAR_W, wp.y + HEADER_H),
+        imgui.ImVec2(wp.x + SIDEBAR_W, wp.y + ws.y), U32(COL.border), 1)
+
+    imgui.SetCursorScreenPos(imgui.ImVec2(wp.x, wp.y + HEADER_H + 10))
+    imgui.BeginChild('##sidebar', imgui.ImVec2(SIDEBAR_W, ws.y - HEADER_H - 10), false)
+    for idx, item in ipairs(sidebar) do
+        if item.group then
+            imgui.Dummy(imgui.ImVec2(0, 4))
+            imgui.SetCursorPosX(18)
+            imgui.TextColored(V4(COL.textHead), item.group)
+            imgui.Dummy(imgui.ImVec2(0, 2))
+        else
+            local p = imgui.GetCursorScreenPos()
+            local w = SIDEBAR_W
+            local h = 30
+            if imgui.InvisibleButton('##side' .. idx, imgui.ImVec2(w, h)) then sidePage = idx end
+            local active = sidePage == idx
+            local hov = imgui.IsItemHovered()
+            if active then
+                dl:AddRectFilled(imgui.ImVec2(p.x + 8, p.y), imgui.ImVec2(p.x + w - 10, p.y + h), accU(0.14), 5)
+                dl:AddRectFilled(imgui.ImVec2(p.x, p.y + 5), imgui.ImVec2(p.x + 3, p.y + h - 5), accU(), 2)
+            elseif hov then
+                dl:AddRectFilled(imgui.ImVec2(p.x + 8, p.y), imgui.ImVec2(p.x + w - 10, p.y + h), U32({1,1,1}, 0.04), 5)
+            end
+            local col = active and accU() or (hov and U32(COL.text) or U32(COL.textDim))
+            drawSideIcon(dl, p.x + 18, p.y + 8, item.icon, col)
+            dl:AddText(imgui.ImVec2(p.x + 40, p.y + (h - imgui.CalcTextSize(item.page).y) * 0.5), col, item.page)
+        end
+    end
+    imgui.EndChild()
+
+    -- ===== Контент =====
+    imgui.SetCursorScreenPos(imgui.ImVec2(wp.x + SIDEBAR_W + 16, wp.y + HEADER_H + 12))
+    imgui.BeginChild('##content', imgui.ImVec2(ws.x - SIDEBAR_W - 32, ws.y - HEADER_H - 24), false)
+    local pageName = sidebar[sidePage] and sidebar[sidePage].page or 'Aimbot'
+    if topTab[0] == 0 then
+        pageGlobals()
+    else
+        if pageName == 'Aimbot' then
+            pageAimbot()
+        else
+            pageSimple(pageName)
+        end
+    end
+    imgui.EndChild()
+
+    imgui.End()
+end)
 
 -- ===================== КОНФИГ =====================
 local function saveConfig()
-    local t = { settings = {} }
-    for k, v in pairs(S) do t.settings[k] = v[0] end
-    t.settings.acc_r, t.settings.acc_g, t.settings.acc_b = accent[0], accent[1], accent[2]
-    t.settings.wm_text = ffi.string(wm_text)
+    local t = { settings = {}, hb = {} }
+    for k, v in pairs(S) do
+        if type(v) == 'cdata' then t.settings[k] = v[0] end
+    end
+    t.settings.weaponIdx = weaponIdx[0]
+    for i = 1, #hitboxNames do
+        t.hb['aim' .. i] = S.aim_hb[i][0]
+        t.hb['tb' .. i]  = S.tb_hb[i][0]
+    end
     inicfg.save(t, CFG_FILE)
 end
 
 local function loadConfig()
     local t = inicfg.load(nil, CFG_FILE)
-    if not t or not t.settings then return false end
-    for k, v in pairs(S) do
-        local val = t.settings[k]
-        if val ~= nil then v[0] = val end
-    end
-    if t.settings.acc_r then
-        accent[0], accent[1], accent[2] = t.settings.acc_r, t.settings.acc_g, t.settings.acc_b
-    end
-    if t.settings.wm_text then ffi.copy(wm_text, tostring(t.settings.wm_text):sub(1, 63)) end
-    return true
-end
-
-local function resetConfig()
-    S.time_on[0], S.time_h[0], S.time_m[0] = false, 12, 0
-    S.weather_on[0], S.weather_idx[0] = false, 0
-    S.wm_on[0], S.wm_nick[0], S.wm_fps[0], S.wm_ping[0], S.wm_time[0] = true, true, true, true, true
-    S.info_on[0], S.info_hp[0], S.info_arm[0], S.info_pos[0], S.info_speed[0] = false, true, true, true, true
-    S.flist_on[0], S.clock_on[0], S.clock_fmt[0], S.notif_on[0] = true, false, 0, true
-    S.widget_alpha[0], S.rounding[0], S.menu_alpha[0], S.anim[0], S.menu_key[0] = 0.85, 6, 0.97, true, 1
-    accent[0], accent[1], accent[2], accent[3] = 0.0, 0.63, 1.0, 1.0
-    ffi.copy(wm_text, 'rage-mod')
-end
-
--- ===================== ВКЛАДКИ =====================
-local function drawWorld(w, h)
-    BeginGroup('Время', imgui.ImVec2(w, h))
-    Toggle('Своё время##time', S.time_on)
-    Hint('Меняет время только у вас на клиенте')
-    imgui.SliderInt('##h', S.time_h, 0, 23, 'Час: %d')
-    imgui.SliderInt('##m', S.time_m, 0, 59, 'Минуты: %d')
-    if imgui.Button('Утро', imgui.ImVec2(-1, 0)) then S.time_h[0], S.time_m[0] = 8, 0 end
-    if imgui.Button('День', imgui.ImVec2(-1, 0)) then S.time_h[0], S.time_m[0] = 13, 0 end
-    if imgui.Button('Ночь', imgui.ImVec2(-1, 0)) then S.time_h[0], S.time_m[0] = 0, 0 end
-    EndGroup()
-    imgui.SameLine()
-    BeginGroup('Погода', imgui.ImVec2(w, h))
-    Toggle('Своя погода##weather', S.weather_on)
-    Hint('Клиентская погода, сервер может её перезаписывать')
-    imgui.Text('Тип погоды')
-    if imgui.Combo('##weather_combo', S.weather_idx, weatherItems, #weatherNames) then
-        notify('Погода: ' .. weatherNames[S.weather_idx[0] + 1])
-    end
-    EndGroup()
-end
-
-local function drawWidgets(w, h)
-    BeginGroup('Watermark', imgui.ImVec2(w, h * 0.5 - 4))
-    Toggle('Включить##wm', S.wm_on)
-    imgui.InputText('##wmtext', wm_text, ffi.sizeof(wm_text))
-    imgui.Checkbox('Ник', S.wm_nick) imgui.SameLine()
-    imgui.Checkbox('FPS', S.wm_fps)
-    imgui.Checkbox('Пинг', S.wm_ping) imgui.SameLine()
-    imgui.Checkbox('Время', S.wm_time)
-    EndGroup()
-    imgui.SameLine()
-    BeginGroup('Инфо-панель', imgui.ImVec2(w, h * 0.5 - 4))
-    Toggle('Включить##info', S.info_on)
-    imgui.Checkbox('Здоровье', S.info_hp) imgui.SameLine()
-    imgui.Checkbox('Броня', S.info_arm)
-    imgui.Checkbox('Позиция', S.info_pos) imgui.SameLine()
-    imgui.Checkbox('Скорость', S.info_speed)
-    EndGroup()
-
-    BeginGroup('Прочие виджеты', imgui.ImVec2(w, h * 0.5 - 4))
-    Toggle('Список функций##flist', S.flist_on)
-    Toggle('Уведомления##notif', S.notif_on)
-    Toggle('Часы##clock', S.clock_on)
-    imgui.RadioButtonIntPtr('24ч', S.clock_fmt, 0) imgui.SameLine()
-    imgui.RadioButtonIntPtr('С секундами', S.clock_fmt, 1)
-    EndGroup()
-    imgui.SameLine()
-    BeginGroup('Вид виджетов', imgui.ImVec2(w, h * 0.5 - 4))
-    imgui.Text('Прозрачность фона')
-    imgui.SliderFloat('##walpha', S.widget_alpha, 0.2, 1.0, '%.2f')
-    imgui.TextDisabled('Виджеты можно перетаскивать,')
-    imgui.TextDisabled('пока открыто меню.')
-    EndGroup()
-end
-
-local function drawMenuTab(w, h)
-    BeginGroup('Цвета', imgui.ImVec2(w, h))
-    imgui.Text('Акцентный цвет')
-    if imgui.ColorEdit4('##accent', accent, imgui.ColorEditFlags.NoInputs) then applyTheme() end
-    imgui.Text('Пресеты')
-    local presets = {
-        { 'Синий', 0.0, 0.63, 1.0 }, { 'Фиолет.', 0.58, 0.36, 1.0 },
-        { 'Красный', 0.95, 0.25, 0.3 }, { 'Зелёный', 0.3, 0.9, 0.45 },
-    }
-    for i, pr in ipairs(presets) do
-        if imgui.Button(pr[1], imgui.ImVec2((imgui.GetContentRegionAvail().x - 8) / 2, 0)) then
-            accent[0], accent[1], accent[2] = pr[2], pr[3], pr[4]
-            applyTheme()
+    if not t then return end
+    if t.settings then
+        for k, v in pairs(S) do
+            if type(v) == 'cdata' and t.settings[k] ~= nil then v[0] = t.settings[k] end
         end
-        if i % 2 == 1 then imgui.SameLine() end
+        if t.settings.weaponIdx ~= nil then weaponIdx[0] = t.settings.weaponIdx end
     end
-    EndGroup()
-    imgui.SameLine()
-    BeginGroup('Интерфейс', imgui.ImVec2(w, h))
-    imgui.Text('Скругление')
-    if imgui.SliderFloat('##round', S.rounding, 0, 12, '%.0f') then applyTheme() end
-    imgui.Text('Прозрачность меню')
-    imgui.SliderFloat('##malpha', S.menu_alpha, 0.5, 1.0, '%.2f')
-    Toggle('Анимации##anim', S.anim)
-    imgui.Text('Клавиша открытия')
-    imgui.Combo('##menukey', S.menu_key, keyItems, #keyNames)
-    EndGroup()
+    if t.hb then
+        for i = 1, #hitboxNames do
+            if t.hb['aim' .. i] ~= nil then S.aim_hb[i][0] = t.hb['aim' .. i] end
+            if t.hb['tb' .. i]  ~= nil then S.tb_hb[i][0]  = t.hb['tb' .. i]  end
+        end
+    end
 end
 
-local function drawMisc(w, h)
-    BeginGroup('Чат', imgui.ImVec2(w, h))
-    if imgui.Button('Очистить чат', imgui.ImVec2(-1, 26)) then
-        for _ = 1, 30 do sampAddChatMessage(' ', -1) end
-        notify('Чат очищен')
-    end
-    if imgui.Button('Скопировать координаты', imgui.ImVec2(-1, 26)) then
-        local x, y, z = getCharCoordinates(PLAYER_PED)
-        setClipboardText(string.format('%.2f, %.2f, %.2f', x, y, z))
-        notify('Координаты скопированы')
-    end
-    if imgui.Button('Тест уведомления', imgui.ImVec2(-1, 26)) then
-        notify('Привет от rage-mod!')
-    end
-    EndGroup()
-    imgui.SameLine()
-    BeginGroup('Скрипт', imgui.ImVec2(w, h))
-    imgui.Text('Версия: ' .. thisScript().version)
-    imgui.Text('Команда: /ragemd')
-    if imgui.Button('Перезагрузить скрипт', imgui.ImVec2(-1, 26)) then thisScript():reload() end
-    if imgui.Button('Выгрузить скрипт', imgui.ImVec2(-1, 26)) then thisScript():unload() end
-    EndGroup()
-end
-
-local function drawConfig(w, h)
-    BeginGroup('Конфигурация', imgui.ImVec2(w, h))
-    imgui.TextDisabled('Файл: moonloader/config/' .. CFG_FILE)
-    if AccentButton('Сохранить') then saveConfig() notify('Конфиг сохранён') end
-    if imgui.Button('Загрузить', imgui.ImVec2(-1, 26)) then
-        if loadConfig() then applyTheme() notify('Конфиг загружен') else notify('Конфиг не найден') end
-    end
-    if imgui.Button('Сбросить', imgui.ImVec2(-1, 26)) then resetConfig() applyTheme() notify('Настройки сброшены') end
-    EndGroup()
-    imgui.SameLine()
-    BeginGroup('О скрипте', imgui.ImVec2(w, h))
-    imgui.TextWrapped('rage-mod — меню для SA-MP в стиле CS2-софта: боковая панель, группбоксы, тумблеры и оверлей-виджеты.')
-    EndGroup()
-end
-
-local tabDraw = { drawWorld, drawWidgets, drawMenuTab, drawMisc, drawConfig }
-
--- ===================== IMGUI =====================
+-- ===================== INIT / MAIN =====================
 imgui.OnInitialize(function()
     local io = imgui.GetIO()
     io.IniFilename = nil
     local glyph = io.Fonts:GetGlyphRangesCyrillic()
     local path = getFolderPath(0x14) .. '\\trebucbd.ttf'
     io.Fonts:Clear()
-    font_main = io.Fonts:AddFontFromFileTTF(path, 14.0, nil, glyph)
-    font_big  = io.Fonts:AddFontFromFileTTF(path, 22.0, nil, glyph)
+    font_main = io.Fonts:AddFontFromFileTTF(path, 15.0, nil, glyph)
+    font_big  = io.Fonts:AddFontFromFileTTF(path, 20.0, nil, glyph)
+    font_logo = font_big
     applyTheme()
 end)
 
--- Главное меню
-imgui.OnFrame(function() return menu[0] end, function(player)
-    local sw, sh = getScreenResolution()
-    imgui.SetNextWindowPos(imgui.ImVec2(sw / 2, sh / 2), imgui.Cond.FirstUseEver, imgui.ImVec2(0.5, 0.5))
-    imgui.SetNextWindowSize(imgui.ImVec2(700, 450), imgui.Cond.Always)
-    imgui.SetNextWindowBgAlpha(S.menu_alpha[0])
-    imgui.PushStyleVarVec2(imgui.StyleVar.WindowPadding, imgui.ImVec2(0, 0))
-    local flags = bit.bor(imgui.WindowFlags.NoTitleBar, imgui.WindowFlags.NoResize,
-        imgui.WindowFlags.NoCollapse, imgui.WindowFlags.NoScrollbar)
-    imgui.Begin('##ragemod_main', menu, flags)
-    imgui.PopStyleVar()
-
-    -- Боковая панель
-    imgui.PushStyleColor(imgui.Col.ChildBg, V4(0.03, 0.035, 0.06, 1))
-    imgui.PushStyleVarVec2(imgui.StyleVar.WindowPadding, imgui.ImVec2(10, 14))
-    imgui.BeginChild('##sidebar', imgui.ImVec2(165, 0), false)
-    imgui.PushFont(font_big)
-    imgui.TextColored(accV(), 'RAGE')
-    imgui.SameLine(0, 2)
-    imgui.Text('MOD')
-    imgui.PopFont()
-    imgui.TextDisabled('SA-MP edition')
-    imgui.Dummy(imgui.ImVec2(0, 10))
-    imgui.TextDisabled('ОСНОВНОЕ')
-    for i = 1, 2 do TabButton(tabs[i].name, i) end
-    imgui.Dummy(imgui.ImVec2(0, 6))
-    imgui.TextDisabled('НАСТРОЙКИ')
-    for i = 3, #tabs do TabButton(tabs[i].name, i) end
-    imgui.EndChild()
-    imgui.PopStyleVar()
-    imgui.PopStyleColor()
-
-    -- Разделитель
-    local dl = imgui.GetWindowDrawList()
-    local wp, ws = imgui.GetWindowPos(), imgui.GetWindowSize()
-    dl:AddLine(imgui.ImVec2(wp.x + 165, wp.y), imgui.ImVec2(wp.x + 165, wp.y + ws.y), U32(0.11, 0.13, 0.19), 1)
-
-    -- Контент
-    imgui.SameLine(0, 0)
-    imgui.PushStyleVarVec2(imgui.StyleVar.WindowPadding, imgui.ImVec2(14, 12))
-    imgui.PushStyleColor(imgui.Col.ChildBg, V4(0, 0, 0, 0))
-    imgui.BeginChild('##content', imgui.ImVec2(0, 0), false)
-    imgui.PushStyleColor(imgui.Col.ChildBg, V4(0.055, 0.065, 0.105, 1))
-    imgui.PushFont(font_big)
-    imgui.Text(tabs[tab].name)
-    imgui.PopFont()
-    imgui.SameLine()
-    imgui.SetCursorPosX(imgui.GetWindowWidth() - 40)
-    if imgui.Button('X##close', imgui.ImVec2(24, 22)) then menu[0] = false end
-    imgui.TextDisabled(tabs[tab].desc)
-    imgui.Dummy(imgui.ImVec2(0, 4))
-
-    local avail = imgui.GetContentRegionAvail()
-    local colW = (avail.x - 8) / 2
-    tabDraw[tab](colW, avail.y - 2)
-
-    imgui.PopStyleColor()
-    imgui.EndChild()
-    imgui.PopStyleColor()
-    imgui.PopStyleVar()
-
-    imgui.End()
-end)
-
--- Оверлей-виджеты
-local function widgetFlags()
-    local f = bit.bor(imgui.WindowFlags.NoTitleBar, imgui.WindowFlags.NoResize,
-        imgui.WindowFlags.AlwaysAutoResize, imgui.WindowFlags.NoScrollbar,
-        imgui.WindowFlags.NoSavedSettings, imgui.WindowFlags.NoFocusOnAppearing,
-        imgui.WindowFlags.NoNav, imgui.WindowFlags.NoCollapse)
-    if not menu[0] then f = bit.bor(f, imgui.WindowFlags.NoMove, imgui.WindowFlags.NoInputs) end
-    return f
-end
-
-local function widgetTopBar()
-    local dl = imgui.GetWindowDrawList()
-    local p, s = imgui.GetWindowPos(), imgui.GetWindowSize()
-    dl:AddRectFilled(p, imgui.ImVec2(p.x + s.x, p.y + 2), accU(), S.rounding[0], 3)
-end
-
-local function myId()
-    local ok, id = sampGetPlayerIdByCharHandle(PLAYER_PED)
-    return ok and id or nil
-end
-
-local function activeFeatures()
-    local list = {}
-    if S.time_on[0] then list[#list + 1] = { 'Своё время', string.format('%02d:%02d', S.time_h[0], S.time_m[0]) } end
-    if S.weather_on[0] then list[#list + 1] = { 'Погода', weatherNames[S.weather_idx[0] + 1] } end
-    if S.info_on[0] then list[#list + 1] = { 'Инфо-панель', 'on' } end
-    if S.clock_on[0] then list[#list + 1] = { 'Часы', 'on' } end
-    return list
-end
-
-imgui.OnFrame(function()
-    return isSampAvailable() and not isPauseMenuActive()
-        and (S.wm_on[0] or S.info_on[0] or S.flist_on[0] or S.clock_on[0] or #notifs > 0)
-end, function(player)
-    player.HideCursor = true
-    local sw, sh = getScreenResolution()
-    local flags = widgetFlags()
-
-    -- Watermark
-    if S.wm_on[0] then
-        imgui.SetNextWindowPos(imgui.ImVec2(sw - 15, 15), imgui.Cond.FirstUseEver, imgui.ImVec2(1, 0))
-        imgui.SetNextWindowBgAlpha(S.widget_alpha[0])
-        imgui.Begin('##w_watermark', nil, flags)
-        widgetTopBar()
-        local parts = { ffi.string(wm_text) }
-        local id = myId()
-        if S.wm_nick[0] and id then parts[#parts + 1] = u8(sampGetPlayerNickname(id)) end
-        if S.wm_fps[0] then parts[#parts + 1] = string.format('%d fps', imgui.GetIO().Framerate) end
-        if S.wm_ping[0] and id then parts[#parts + 1] = string.format('%d ms', sampGetPlayerPing(id)) end
-        if S.wm_time[0] then parts[#parts + 1] = os.date('%H:%M') end
-        imgui.TextColored(accV(), parts[1])
-        if #parts > 1 then
-            imgui.SameLine()
-            imgui.Text('| ' .. table.concat(parts, ' | ', 2))
-        end
-        imgui.End()
-    end
-
-    -- Список функций (аналог keybind-list)
-    if S.flist_on[0] then
-        local list = activeFeatures()
-        if #list > 0 or menu[0] then
-            imgui.SetNextWindowPos(imgui.ImVec2(15, sh * 0.4), imgui.Cond.FirstUseEver)
-            imgui.SetNextWindowBgAlpha(S.widget_alpha[0])
-            imgui.Begin('##w_flist', nil, flags)
-            widgetTopBar()
-            imgui.TextColored(accV(), 'Активные функции')
-            imgui.Separator()
-            if #list == 0 then imgui.TextDisabled('ничего не включено') end
-            for _, it in ipairs(list) do
-                imgui.Text(it[1])
-                imgui.SameLine(150)
-                imgui.TextDisabled('[' .. it[2] .. ']')
-            end
-            imgui.End()
-        end
-    end
-
-    -- Инфо-панель
-    if S.info_on[0] then
-        imgui.SetNextWindowPos(imgui.ImVec2(15, sh * 0.6), imgui.Cond.FirstUseEver)
-        imgui.SetNextWindowBgAlpha(S.widget_alpha[0])
-        imgui.Begin('##w_info', nil, flags)
-        widgetTopBar()
-        imgui.TextColored(accV(), 'Информация')
-        imgui.Separator()
-        if S.info_hp[0] then
-            local hp = getCharHealth(PLAYER_PED)
-            imgui.PushStyleColor(imgui.Col.PlotHistogram, V4(0.9, 0.25, 0.3, 1))
-            imgui.ProgressBar(math.min(hp, 100) / 100, imgui.ImVec2(170, 14), 'HP ' .. hp)
-            imgui.PopStyleColor()
-        end
-        if S.info_arm[0] then
-            local arm = getCharArmour(PLAYER_PED)
-            imgui.ProgressBar(math.min(arm, 100) / 100, imgui.ImVec2(170, 14), 'Броня ' .. arm)
-        end
-        if S.info_pos[0] then
-            local x, y, z = getCharCoordinates(PLAYER_PED)
-            imgui.Text(string.format('X: %.1f  Y: %.1f  Z: %.1f', x, y, z))
-        end
-        if S.info_speed[0] then
-            local spd
-            if isCharInAnyCar(PLAYER_PED) then
-                spd = getCarSpeed(storeCarCharIsInNoSave(PLAYER_PED))
-            else
-                spd = getCharSpeed(PLAYER_PED)
-            end
-            imgui.Text(string.format('Скорость: %d км/ч', spd * 3.6))
-        end
-        imgui.End()
-    end
-
-    -- Часы
-    if S.clock_on[0] then
-        imgui.SetNextWindowPos(imgui.ImVec2(sw / 2, 15), imgui.Cond.FirstUseEver, imgui.ImVec2(0.5, 0))
-        imgui.SetNextWindowBgAlpha(S.widget_alpha[0])
-        imgui.Begin('##w_clock', nil, flags)
-        widgetTopBar()
-        imgui.PushFont(font_big)
-        imgui.TextColored(accV(), os.date(S.clock_fmt[0] == 0 and '%H:%M' or '%H:%M:%S'))
-        imgui.PopFont()
-        imgui.End()
-    end
-
-    -- Уведомления
-    local now = os.clock()
-    for i = #notifs, 1, -1 do
-        if now - notifs[i].t > 3.0 then table.remove(notifs, i) end
-    end
-    for i, n in ipairs(notifs) do
-        local age = now - n.t
-        local a = 1
-        if age < 0.25 then a = age / 0.25 elseif age > 2.6 then a = (3.0 - age) / 0.4 end
-        imgui.PushStyleVarFloat(imgui.StyleVar.Alpha, math.max(0, math.min(1, a)))
-        imgui.SetNextWindowPos(imgui.ImVec2(sw - 15, sh - 60 - (i - 1) * 44), imgui.Cond.Always, imgui.ImVec2(1, 1))
-        imgui.SetNextWindowBgAlpha(0.95)
-        imgui.Begin('##notif' .. i, nil, bit.bor(flags, imgui.WindowFlags.NoMove, imgui.WindowFlags.NoInputs))
-        widgetTopBar()
-        imgui.TextColored(accV(), 'rage-mod')
-        imgui.SameLine()
-        imgui.Text(n.text)
-        imgui.End()
-        imgui.PopStyleVar()
-    end
-end)
-
--- ===================== MAIN =====================
 function main()
     if not isSampLoaded() or not isSampfuncsLoaded() then return end
     while not isSampAvailable() do wait(100) end
 
     loadConfig()
-    sampRegisterChatCommand('ragemd', function()
-        menu[0] = not menu[0]
-    end)
-    chat('загружен. Меню: {00A0FF}/ragemd')
+    sampRegisterChatCommand('ragemd', function() menu[0] = not menu[0] end)
+    chat('загружен. Меню: {3D9BE0}/ragemd')
 
-    local lastWeather = 0
     while true do
         wait(0)
         local key = keyCodes[S.menu_key[0] + 1]
         if key and key ~= 0 and isKeyJustPressed(key)
-            and not sampIsChatInputActive() and not sampIsDialogActive() and not isSampfuncsConsoleActive() then
+            and not sampIsChatInputActive() and not sampIsDialogActive()
+            and not isSampfuncsConsoleActive() then
             menu[0] = not menu[0]
-        end
-        if S.time_on[0] then setTimeOfDay(S.time_h[0], S.time_m[0]) end
-        if S.weather_on[0] and os.clock() - lastWeather > 0.5 then
-            forceWeatherNow(weatherIds[S.weather_idx[0] + 1])
-            lastWeather = os.clock()
         end
     end
 end
