@@ -20,7 +20,7 @@
 
 script_name('rage-mod')
 script_author('rage-mod')
-script_version('4.8.2')
+script_version('4.8.3')
 
 local imgui    = require 'mimgui'
 local encoding = require 'encoding'
@@ -2747,6 +2747,42 @@ end
 RG.JA_RATE = { [22] = 0.25, [23] = 0.4, [24] = 0.8, [25] = 1.0, [26] = 0.3, [27] = 0.35, [28] = 0.07, [29] = 0.09,
                [30] = 0.11, [31] = 0.11, [32] = 0.07, [33] = 1.0, [34] = 1.2, [38] = 0.03 }
 RG.ja = { lastT = 0, sending = false, warned = false }
+function RG.jaWindow() return O.ja_on and os.clock() - RG.ja.lastT < 0.25 end
+-- анимация выстрела верхней частью тела (ноги продолжают прыжок)
+RG.JA_ANIM = { [22] = { 'COLT45', 'colt45_fire' }, [23] = { 'SILENCED', 'Silence_fire' }, [24] = { 'PYTHON', 'python_fire' },
+    [25] = { 'SHOTGUN', 'shotgun_fire' }, [26] = { 'COLT45', 'colt45_fire' }, [27] = { 'BUDDY', 'buddy_fire' },
+    [28] = { 'UZI', 'UZI_fire' }, [29] = { 'UZI', 'UZI_fire' }, [30] = { 'RIFLE', 'RIFLE_fire' }, [31] = { 'RIFLE', 'RIFLE_fire' },
+    [32] = { 'UZI', 'UZI_fire' }, [33] = { 'RIFLE', 'RIFLE_fire' }, [34] = { 'RIFLE', 'RIFLE_fire' }, [38] = { 'RIFLE', 'RIFLE_fire' } }
+-- синки во время выстрела в прыжке: сервер видит зажатые огонь+прицел и прицельную камеру
+-- (обёртки ставим здесь, т.к. RG объявлен ниже исходных хуков)
+do
+    local origPS, origAS = sampev.onSendPlayerSync, sampev.onSendAimSync
+    function sampev.onSendPlayerSync(data)
+        local r = origPS and origPS(data)
+        if RG.jaWindow() then
+            data.keysData = bit.bor(data.keysData or 0, 4 + 128)   -- KEY_FIRE + KEY_AIM
+            data.weapon = getCurrentCharWeapon(PLAYER_PED)
+        end
+        return r
+    end
+    function sampev.onSendAimSync(data)
+        if RG.jaWindow() then
+            local cx, cy, cz, fx, fy, fz = RG.cam()
+            data.camMode = 53
+            data.camPos.x, data.camPos.y, data.camPos.z = cx, cy, cz
+            data.camFront.x, data.camFront.y, data.camFront.z = fx, fy, fz
+            data.aimZ = math.asin(clamp(fz, -1, 1))
+            return
+        end
+        if origAS then return origAS(data) end
+    end
+end
+function RG.jaAnim(w)
+    local a = RG.JA_ANIM[w]
+    if not a then return end
+    if not hasAnimationLoaded(a[1]) then requestAnimation(a[1]); return end
+    taskPlayAnimSecondary(PLAYER_PED, a[2], a[1], 8.0, false, false, false, false, 250)
+end
 -- отправить bullet sync (пакет 206) вручную
 function RG.jaSendBullet(d)
     local bs = raknetNewBitStream()
@@ -2803,6 +2839,9 @@ function RG.jaTick(free)
         d.target, d.center = { x = tx, y = ty, z = tz }, { x = 0, y = 0, z = 0 }
     end
     ja.lastT = now
+    pcall(RG.jaAnim, w)
+    pcall(sampForceOnfootSync)
+    pcall(sampForceAimSync)
     local okb, eb = pcall(RG.jaSendBullet, d)
     if not okb then
         TR.T('ja.err ' .. tostring(eb))
@@ -2820,7 +2859,9 @@ function RG.jaTick(free)
             chat(('jump {3DE07A}%.1f{FFFFFF} -> %s[%d]'):format(dmg, okn and nm or '?', id))
         end
         lua_thread.create(function()
+            wait(0)
             if not sampIsPlayerConnected(id) then return end
+            pcall(sampForceOnfootSync)
             sampSendGiveDamage(id, dmg, w, bp)
             if RG.on() and O.rage_other_double_tap then wait(60); sampSendGiveDamage(id, dmg, w, bp) end
         end)
