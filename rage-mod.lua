@@ -20,13 +20,24 @@
 
 script_name('rage-mod')
 script_author('rage-mod')
-script_version('4.8.18')
+script_version('4.8.19')
 
 local imgui    = require 'mimgui'
 local encoding = require 'encoding'
 local inicfg   = require 'inicfg'
 local ffi      = require 'ffi'
-local sampev   = require 'samp.events'
+-- запоминаем обработчики событий samp.events: на время выстрела движком их снимаем,
+-- иначе MoonLoader повторно входит в скрипт -> «cannot resume non-suspended coroutine»
+local sampevH = {}
+local sampev
+do
+    local add = addEventHandler
+    addEventHandler = function(n, f) sampevH[#sampevH + 1] = { n, f }; return add(n, f) end
+    local ok, r = pcall(require, 'samp.events')
+    addEventHandler = add
+    if not ok then error(r) end
+    sampev = r
+end
 encoding.default = 'CP1251'
 local u8  = encoding.UTF8
 local new = imgui.new
@@ -1077,7 +1088,7 @@ VIS.SUB_QP = { title = 'QUICK PEEK ASSIST', rows = CARD('qp', {
 -- Jump Attack: в прыжке игра стрелять не даёт — выстрел (bullet sync + урон) отправляет скрипт
 VIS.SUB_JA = { title = 'JUMP ATTACK', rows = CARD('ja', {
     T_('Enabled', false, 'ja_on'),
-    SEL('Method', { 'Standing Spoof (real)', 'Scripted Jump', 'Packet (old)' }, 2, 'ja_method4'),
+    SEL('Method', { 'Engine Shot (real)', 'Scripted Jump', 'Packet (old)', 'Standing Spoof' }, 0, 'ja_method5'),
     SL('Jump Power', 3, 9, 5.5, '%.1f', true, 'ja_power'),
     SEL('Fire From', { 'On Click', 'With Trigger Bot', 'Click or Trigger' }, 2, 'ja_src'),
     T_('Need Target', false, 'ja_need2'),
@@ -2852,7 +2863,7 @@ end
 RG.JA_RATE = { [22] = 0.25, [23] = 0.4, [24] = 0.8, [25] = 1.0, [26] = 0.3, [27] = 0.35, [28] = 0.07, [29] = 0.09,
                [30] = 0.11, [31] = 0.11, [32] = 0.07, [33] = 1.0, [34] = 1.2, [38] = 0.03 }
 RG.ja = { lastT = 0, sending = false, warned = false }
-function RG.jaWindow() return O.ja_on and (O.ja_method4 or 2) == 2 and os.clock() - RG.ja.lastT < 0.25 end
+function RG.jaWindow() local m = O.ja_method5 or 0; return O.ja_on and (m == 0 or m == 2) and os.clock() - RG.ja.lastT < 0.25 end
 -- цель выстрела Jump Attack (для подмены пули в onBullet)
 function RG.jaShotTarget()
     local ja = RG.ja
@@ -2868,6 +2879,25 @@ end
 -- Повторный вход в Lua из FFI-вызова LuaJIT не поддерживает: состояние VM портилось,
 -- и после нескольких выстрелов ломались сайлент и вся стрельба. Из callMethod повторный вход разрешён.
 RG.jaBuf = ffi.new('float[6]')
+RG.EV_NET = { onSendPacket = true, onReceivePacket = true, onSendRpc = true, onReceiveRpc = true }
+function RG.evCanDetach() return type(removeEventHandler) == 'function' and #sampevH > 0 end
+function RG.evDetach()
+    if RG.evOff then return true end
+    RG.evOff = {}
+    for _, h in ipairs(sampevH) do
+        if RG.EV_NET[h[1]] then
+            local ok = pcall(removeEventHandler, h[1], h[2])
+            if not ok then return false end
+            RG.evOff[#RG.evOff + 1] = h
+        end
+    end
+    return true
+end
+function RG.evAttach()
+    if not RG.evOff then return end
+    for _, h in ipairs(RG.evOff) do pcall(addEventHandler, h[1], h[2]) end
+    RG.evOff = nil
+end
 -- CWeapon активного слота: int32[0]=тип, [1]=состояние, [2]=патроны в обойме, [3]=всего, [4]=таймер (мс)
 function RG.jaWeapon()
     local ped = getCharPointer(PLAYER_PED)
@@ -2900,7 +2930,11 @@ function RG.jaEngineFire(w, ox, oy, oz, tx, ty, tz, tped)
     if tped then local okp, pp = pcall(getCharPointer, tped); if okp and pp and pp ~= 0 then te = pp end end
     -- bool __thiscall CWeapon::Fire(CEntity* owner, CVector* origin, CVector* muzzle, CEntity* target, CVector* targetPos, CVector* driveBy)
     local st0, tm0 = wt[1], wt[4]
-    local r = callMethod(0x742300, wp, 6, 0, ped, base, base, te, base + 12, 0)
+    -- на время Fire снимаем обработчики samp.events: пуля/урон уходят на сервер напрямую от SA-MP
+    if not RG.evDetach() then RG.evAttach(); return false, 'detach failed' end
+    local okc, r = pcall(callMethod, 0x742300, wp, 6, 0, ped, base, base, te, base + 12, 0)
+    RG.evAttach()
+    if not okc then error(r) end
     r = r and bit.band(r, 0xFF) ~= 0
     local st1, clip = wt[1], wt[2]
     if clip > 0 then wt[1] = 0 end                            -- FIRING не оставляем: оружие снова «готово»
@@ -2989,9 +3023,13 @@ end
 function RG.jaTick(free)
     local ja = RG.ja
     if not O.ja_on or not free or not spawnedAt or os.clock() - spawnedAt < 5 then return end
-    local method = O.ja_method4 or 2
+    local method = O.ja_method5 or 0
     if method == 1 then return RG.jaJumpTick(free, true) end
-    if method == 0 then return RG.jaSpoofTick(free) end
+    if method == 3 then return RG.jaSpoofTick(free) end
+    if method == 0 and not RG.evCanDetach() then
+        if not ja.warnDet then ja.warnDet = true; chat('Jump Attack: Engine Shot недоступен (нет removeEventHandler), стреляю пакетом') end
+        method = 2
+    end
     -- движок отказывается стрелять из задачи игрового прыжка (поэтому без бхопа/аир-стрейфа не работало):
     -- прыжок с оружием всегда делает скрипт, без задачи прыжка — и выстрел движком проходит стабильно
     if method == 0 and O.ja_ownjump ~= false then RG.jaJumpTick(free, false) end
