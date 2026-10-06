@@ -20,7 +20,7 @@
 
 script_name('rage-mod')
 script_author('rage-mod')
-script_version('4.8.16')
+script_version('4.8.17')
 
 local imgui    = require 'mimgui'
 local encoding = require 'encoding'
@@ -3091,10 +3091,16 @@ function RG.jaSpoofTick(free)
     local ja = RG.ja
     if O.ja_ownjump ~= false then RG.jaJumpTick(free, false) end
     if not free or not isCharOnFoot(PLAYER_PED) or isCharInWater(PLAYER_PED) then return end
-    if not isCharInAir(PLAYER_PED) then return end
+    local now = os.clock()
+    -- «в воздухе» считаем сами: после нашей подмены isCharInAir начинает врать (флаг-то мы поставили),
+    -- и раньше подмена выключалась через кадр — поэтому персонаж даже не пытался стрелять
+    local x, y, z = getCharCoordinates(PLAYER_PED)
+    local _, _, vz = getCharVelocity(PLAYER_PED)
+    local h = z - getGroundZFor3dCoord(x, y, z) - 1.0
+    local air = isCharInAir(PLAYER_PED) or (h > 0.2 and (math.abs(vz) > 0.3 or now - (ja.spoofT or 0) < 0.15))
+    if not air then return end
     local w = getCurrentCharWeapon(PLAYER_PED)
     if not RG.DMG[w] then return end
-    local now = os.clock()
     local src = O.ja_src or 2
     local trig = src ~= 0 and O.tb_on and now - RG.tb.fireT < 0.05
     local want = isKeyDown(0x02) or (src ~= 1 and isKeyDown(0x01)) or trig
@@ -3102,14 +3108,21 @@ function RG.jaSpoofTick(free)
     local wt, ped = RG.jaWeapon()
     if not ped then return end
     local f = ffi.cast('uint8_t*', ped + 0x46C)
-    f[0] = bit.bor(f[0], 1)                                     -- bIsStanding = true
+    local f0, f1 = f[0], f[1]
+    f[0] = bit.bor(f[0], 0x03)                                  -- bIsStanding + bWasStanding
+    f[1] = bit.band(f[1], 0xFD)                                 -- bIsInTheAir = false (бит 9)
+    ja.spoofT = now
     if trig then setGameKeyState(6, 255); setGameKeyState(17, 255) end
     -- рапид в прыжке: оружие «готово» раньше, чем закончится анимация выстрела
     if O.ja_rapid and wt and wt[1] == 1 and wt[2] > 0 then
         local iv = (RG.JA_RATE[w] or 0.3) / ((O.ja_rate or 100) / 100) * 0.5
         if now - (RG.qp.shotT or 0) >= iv then wt[1] = 0; wt[4] = 0 end
     end
-    if now - (ja.spoofLog or 0) > 1 then ja.spoofLog = now; TR.E('ja.spoof w' .. w) end
+    if now - (ja.spoofLog or 0) > 0.25 then
+        ja.spoofLog = now
+        TR.E(('ja.spoof w%d h=%.2f vz=%.1f flags %02X/%02X aimGun=%d st=%d'):format(w, h, vz, f0, f1,
+            bit.band(f[0], 0x10) ~= 0 and 1 or 0, wt and wt[1] or -1))
+    end
 end
 
 -- очередь задач Jump Attack: выполняются в отдельном lua_thread (после wait — когда main-корутина на паузе)
