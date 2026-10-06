@@ -20,7 +20,7 @@
 
 script_name('rage-mod')
 script_author('rage-mod')
-script_version('4.6.0')
+script_version('4.6.1')
 
 local imgui    = require 'mimgui'
 local encoding = require 'encoding'
@@ -2938,10 +2938,22 @@ function VIS.tcF(addr, c, alpha, mul)
     p[0], p[1], p[2] = c[1] * mul, c[2] * mul, c[3] * mul
     if alpha then p[3] = c[4] or 255 end
 end
+-- CTimeCycle::CalcColoursForPoint(CVector point, CColourSet* set) — 0x5603D0, cdecl, CVector по значению
+function VIS.tcRecalc()
+    if not VIS.calcColours then
+        VIS.calcColours = ffi.cast('void(__cdecl*)(float, float, float, void*)', 0x5603D0)
+    end
+    local cx, cy, cz = getActiveCameraCoordinates()
+    VIS.calcColours(cx, cy, cz, ffi.cast('void*', 0xB7C4A0))
+end
 function VIS.timecycTick()
     local need = O.fog_on or O.sky_on or O.sun_on or O.cl_on or O.amb_on or O.flt_on or O.wat_on or O.shd_on
     VIS.tcFreeze(need and true or false)
     if not need or VIS.tcState ~= 'frozen' then return end
+    -- Update игры заморожен, поэтому каждый кадр сами считаем «родные» цвета (время суток, погода, зоны)
+    -- и поверх пишем только включённые опции. Выключил опцию — сразу вернулись игровые значения,
+    -- а не застывшие последние.
+    VIS.tcRecalc()
     if O.fog_on then
         ffi.cast('float*', 0xB7C4F0)[0] = O.fog_far or 900
         ffi.cast('float*', 0xB7C4F4)[0] = math.min(O.fog_start or 250, (O.fog_far or 900) - 10)
@@ -2991,18 +3003,44 @@ function VIS.worldTick(now)
     if st.hud ~= (O.hud_hide or false) then st.hud = O.hud_hide or false; pcall(displayHud, not st.hud) end
     if st.radar ~= (O.hud_radar or false) then st.radar = O.hud_radar or false; pcall(displayRadar, not st.radar) end
     if O.wt_on then
+        if st.w == nil then st.wOrig = VIS.srvWeather or ffi.cast('int16_t*', 0xC81320)[0] end
         if st.w ~= O.wt_weather or now - (st.wt or 0) > 2 then
             st.w, st.wt = O.wt_weather, now
             pcall(forceWeatherNow, VIS.WEATHER_ID[O.wt_weather + 1] or 1)
         end
-    else st.w = nil end
-    if O.wt_time_on then pcall(setTimeOfDay, O.wt_hour or 12, O.wt_min or 0) end
+    elseif st.w ~= nil then
+        -- выключили: возвращаем погоду сервера (или ту, что была до включения)
+        st.w = nil
+        pcall(forceWeatherNow, VIS.srvWeather or st.wOrig or 1)
+    end
+    if O.wt_time_on then
+        if not st.tOn then
+            st.tOn = true
+            local okt, h, m = pcall(getTimeOfDay)
+            st.tOrig = okt and { h, m } or nil
+        end
+        pcall(setTimeOfDay, O.wt_hour or 12, O.wt_min or 0)
+    elseif st.tOn then
+        st.tOn = false
+        local t = VIS.srvTime or st.tOrig
+        if t then pcall(setTimeOfDay, t[1], t[2] or 0) end
+    end
     if O.v_fov_on and doesCharExist(PLAYER_PED) then
         local w = getCurrentCharWeapon(PLAYER_PED)
         local scoped = isKeyDown(0x02) and (w == 34 or w == 35 or w == 36 or w == 43)
         if not scoped then pcall(cameraSetLerpFov, O.v_fov, O.v_fov, 1000, true) end
+        st.fov = true
+    elseif st.fov then
+        -- выключили Override FOV: снимаем зафиксированный скриптом FOV
+        st.fov = false
+        pcall(cameraResetNewScriptables)
+        pcall(cameraSetLerpFov, 70, 70, 100, false)
     end
 end
+-- запоминаем, что ставит сервер, чтобы вернуть это при выключении оверрайдов
+function sampev.onSetWeather(id) VIS.srvWeather = id end
+function sampev.onSetPlayerTime(h, m) VIS.srvTime = { h, m } end
+function sampev.onSetWorldTime(h) VIS.srvTime = { h, 0 } end
 
 -- ---------- сбор данных игроков ----------
 function VIS.collectPlayers(now, cx, cy, cz, fx, fy)
@@ -4294,6 +4332,8 @@ function onScriptTerminate(scr)
         pcall(setAntiAfk, false)
         pcall(VIS.restoreAll)
         pcall(VIS.tcFreeze, false)
+        if VIS.st.w ~= nil then pcall(forceWeatherNow, VIS.srvWeather or VIS.st.wOrig or 1) end
+        if VIS.st.fov then pcall(cameraResetNewScriptables) end
         saveConfig()
         releaseWeaponIcons()
     end
