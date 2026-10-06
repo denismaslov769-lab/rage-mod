@@ -20,7 +20,7 @@
 
 script_name('rage-mod')
 script_author('rage-mod')
-script_version('3.7.0')
+script_version('3.8.0')
 
 local imgui    = require 'mimgui'
 local encoding = require 'encoding'
@@ -185,7 +185,8 @@ local RU = {
     ['MAIN'] = 'ОСНОВНОЕ', ['OTHER'] = 'ПРОЧЕЕ', ['SELECTION'] = 'ВЫБОР ЦЕЛИ', ['ANTI-AIM'] = 'АНТИ-АИМ',
     ['TRIGGERBOT'] = 'ТРИГГЕРБОТ', ['ENEMY'] = 'ВРАГИ', ['ENEMY MODEL'] = 'МОДЕЛЬ ВРАГА', ['VIEW'] = 'ВИД',
     ['WORLD ESP'] = 'ESP МИРА', ['MISCELLANEOUS'] = 'РАЗНОЕ', ['MOVEMENT'] = 'ДВИЖЕНИЕ', ['FEATURES'] = 'ФУНКЦИИ',
-    ['YAW'] = 'ПОВОРОТ',
+    ['YAW'] = 'ПОВОРОТ', ['BUNNY HOP'] = 'БАННИ-ХОП', ['Direction'] = 'Направление', ['Velocity'] = 'По инерции',
+    ['Mouse'] = 'По мышке', ['Hop Speed'] = 'Скорость прыжков', ['Steer In Air'] = 'Рулить мышкой в воздухе',
     -- ряды
     ['Enabled'] = 'Включено', ['Silent Aim'] = 'Тихий аим', ['Automatic Fire'] = 'Автострельба',
     ['Aim Through Walls'] = 'Сквозь стены', ['Refine Shot'] = 'Уточнение выстрела', ['Field of View'] = 'Поле зрения',
@@ -458,6 +459,14 @@ local SUB_YAW = { title = 'YAW', rows = CARD('aa', {
     SEL('Toggle Key', keyNames, 0, 'aa_key'),
 }) }
 
+-- Bunny Hop: Direction = Velocity — прыжки по инерции (куда летел), Mouse — туда, куда смотрит камера/мышка
+local SUB_BHOP = { title = 'BUNNY HOP', rows = CARD('bhop', {
+    T_('Enabled', false, 'm_move_bunny_hop'),
+    SEL('Direction', { 'Velocity', 'Mouse' }, 1, 'bhop_dir'),
+    SL('Hop Speed', 4, 20, 9, '%d', false, 'bhop_speed'),
+    T_('Steer In Air', true, 'bhop_steer'),
+}) }
+
 local ROWS = {
     rage_main = CARD('rage_main', {
         T_('Enabled', true), T_('Silent Aim', true), T_('Automatic Fire', true), T_('Aim Through Walls', true),
@@ -524,7 +533,7 @@ local ROWS = {
         CH('Windows'), CH('Removals'), CH('Ambience'), CH('Hit Marker'), CH('Bullet Tracers'), COL('Bullet Impacts', true),
     }),
     m_move = CARD('m_move', {
-        T_('Bunny Hop'), T_('Air Strafe'), T_('Jump Bug'), T_('Standalone Quick Stop'),
+        CH('Bunny Hop', SUB_BHOP), T_('Air Strafe'), T_('Jump Bug'), T_('Standalone Quick Stop'),
         T_('Strafe Assist'), T_('Edge Jump'), T_('Slow Walk'), T_('Fast Ladder'),
     }),
     m_feat = CARD('m_feat', {
@@ -1418,9 +1427,25 @@ local function mvDoJump(vx, vy)
 end
 
 -- управление в воздухе: Air Strafe (WASD рулит скоростью) и Strafe Assist (без клавиш — доворот к камере)
+-- направление банни-хопа в режиме Mouse: куда смотрит камера (с WASD — относительно камеры); nil — режим Velocity
+local function bhopDir(I)
+    if O.bhop_dir ~= 1 then return nil end
+    if I.moving then return I.dx, I.dy end
+    local h = math.rad(camHeading())
+    return -math.sin(h), math.cos(h)
+end
+
 local function mvAir(I, speed)
     local vx, vy, vz = getCharVelocity(PLAYER_PED)
     local hs = math.sqrt(vx * vx + vy * vy)
+    -- банни-хоп по мышке: пока держишь прыжок, полёт поворачивает за камерой
+    if O.m_move_bunny_hop and O.bhop_steer and I.jump then
+        local ex, ey = bhopDir(I)
+        if ex then
+            setCharVelocity(PLAYER_PED, ex * O.bhop_speed, ey * O.bhop_speed, vz)
+            return
+        end
+    end
     if I.moving and O.m_move_air_strafe then
         local s = math.max(hs, speed)
         setCharVelocity(PLAYER_PED, I.dx * s, I.dy * s, vz)
@@ -1458,7 +1483,9 @@ local function aaMoveTick(free, I)
     if I.jump and (not aaJumpHeld or O.m_move_bunny_hop) and not inAir and now - mvJumpT > 0.3 then
         local s = speed
         if O.m_move_bunny_hop then s = math.max(s, math.sqrt(vx * vx + vy * vy)) end
-        mvDoJump(dx * s, dy * s)
+        local ex, ey = nil, nil
+        if O.m_move_bunny_hop then ex, ey = bhopDir(I) end
+        if ex then mvDoJump(ex * O.bhop_speed, ey * O.bhop_speed) else mvDoJump(dx * s, dy * s) end
         aaPos = nil
         aaJumpHeld = I.jump
         return
@@ -1555,10 +1582,18 @@ local function mvTick(free, I)
     end
 
     -- дальше — только для обычного движения (при «Show Locally» бег/прыжок/воздух ведёт aaMoveTick)
-    if localSpinning then mv.wasAir, mv.prevMoving = inAir, I.moving; return end
+    if localSpinning then mv.wasAir, mv.prevMoving, mv.jumpHeld = inAir, I.moving, I.jump; return end
 
     -- Bunny Hop: держишь прыжок — прыгаем в момент приземления, сохраняя скорость полёта
-    if O.m_move_bunny_hop and I.jump and mv.wasAir and not inAir and not water and now - mvJumpT > 0.2 then
+    -- с банни-хопом прыжок делает скрипт (игровой прыжок блокируем, чтобы не мешал)
+    if O.m_move_bunny_hop then setGameKeyState(BTN_JUMP, 0) end
+    if O.m_move_bunny_hop and I.jump and (mv.wasAir or not mv.jumpHeld) and not inAir and not water and now - mvJumpT > 0.2 then
+        local ex, ey = bhopDir(I)
+        if ex then
+            mv.airVx, mv.airVy = ex * O.bhop_speed, ey * O.bhop_speed
+        elseif not mv.wasAir then
+            mv.airVx, mv.airVy = vx, vy       -- первый прыжок по инерции — с текущей скоростью бега
+        end
         mvDoJump(mv.airVx, mv.airVy)
     elseif not inAir and now - mvJumpT < 0.15 then
         setCharVelocity(PLAYER_PED, mv.airVx, mv.airVy, AA_JUMP_VZ)
@@ -1591,7 +1626,7 @@ local function mvTick(free, I)
     -- Slow Walk: с зажатым Alt ходим заметно медленнее
     if O.m_move_slow_walk and I.walk and I.moving and not inAir then animSpeed(WALK_ANIMS, 0.55) end
 
-    mv.wasAir, mv.prevMoving = inAir, I.moving
+    mv.wasAir, mv.prevMoving, mv.jumpHeld = inAir, I.moving, I.jump
 end
 
 -- ============================================================ MISC: FEATURES
