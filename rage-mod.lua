@@ -20,7 +20,7 @@
 
 script_name('rage-mod')
 script_author('rage-mod')
-script_version('4.8.8')
+script_version('4.8.9')
 
 local imgui    = require 'mimgui'
 local encoding = require 'encoding'
@@ -217,7 +217,10 @@ local RU = {
     ['TRIGGERBOT'] = 'ТРИГГЕРБОТ', ['ENEMY'] = 'ВРАГИ', ['ENEMY MODEL'] = 'МОДЕЛЬ ВРАГА', ['VIEW'] = 'ВИД',
     ['WORLD ESP'] = 'ESP МИРА', ['MISCELLANEOUS'] = 'РАЗНОЕ', ['MOVEMENT'] = 'ДВИЖЕНИЕ', ['FEATURES'] = 'ФУНКЦИИ',
     ['YAW'] = 'ПОВОРОТ', ['BUNNY HOP'] = 'БАННИ-ХОП', ['Direction'] = 'Направление', ['Velocity'] = 'По инерции',
-    ['Mouse'] = 'По мышке', ['Hop Speed'] = 'Скорость прыжков', ['Steer In Air'] = 'Рулить мышкой в воздухе',
+    ['Mouse'] = 'По мышке', ['Hop Speed'] = 'Скорость прыжков', ['Jump Height'] = 'Высота прыжка', ['Timing'] = 'Тайминг',
+    ['Instant (touch)'] = 'Мгновенно (касание)', ['Early (pre-land)'] = 'Заранее (до касания)', ['Normal'] = 'Обычный',
+    ['Pre-land'] = 'Запас до земли', ['Speed Gain'] = 'Набор скорости', ['Gain per Hop'] = 'Прибавка за прыжок',
+    ['Max Speed'] = 'Макс. скорость', ['Steer In Air'] = 'Рулить мышкой в воздухе',
     -- ряды
     ['Enabled'] = 'Включено', ['Silent Aim'] = 'Тихий аим', ['Automatic Fire'] = 'Автострельба',
     ['Magic Bullet'] = 'Магическая пуля', ['MAGIC BULLET'] = 'МАГИЧЕСКАЯ ПУЛЯ', ['Max Distance'] = 'Макс. дистанция',
@@ -782,7 +785,13 @@ local SUB_PITCH = { title = 'PITCH', rows = CARD('aap', {
 local SUB_BHOP = { title = 'BUNNY HOP', rows = CARD('bhop', {
     T_('Enabled', false, 'm_move_bunny_hop'),
     SEL('Direction', { 'Velocity', 'Mouse' }, 1, 'bhop_dir'),
-    SL('Hop Speed', 4, 20, 9, '%d', false, 'bhop_speed'),
+    SL('Hop Speed', 4, 40, 12, '%d', false, 'bhop_speed'),
+    SL('Jump Height', 2, 15, 5.5, '%.1f', true, 'bhop_height'),
+    SEL('Timing', { 'Instant (touch)', 'Early (pre-land)', 'Normal' }, 0, 'bhop_timing'),
+    SL('Pre-land', 0, 60, 20, '%d cm', false, 'bhop_pre'),
+    T_('Speed Gain', false, 'bhop_gain'),
+    SL('Gain per Hop', 1, 30, 8, '%d%%', false, 'bhop_gain_p'),
+    SL('Max Speed', 10, 60, 30, '%d', false, 'bhop_max'),
     T_('Steer In Air', true, 'bhop_steer'),
 }) }
 
@@ -2070,11 +2079,35 @@ local function mvInput(free)
 end
 
 -- прыжок скриптом: приподнимаем педа (снимается флаг «стоит») и даём вертикальную скорость
-local function mvDoJump(vx, vy)
+local function mvDoJump(vx, vy, vz)
     mvJumpT = os.clock()
+    vz = vz or AA_JUMP_VZ
+    VIS.bh.vz = vz
     local p = pedPos()
     if p then p[2] = p[2] + 0.15 end
-    setCharVelocity(PLAYER_PED, vx, vy, AA_JUMP_VZ)
+    setCharVelocity(PLAYER_PED, vx, vy, vz)
+end
+
+-- ---------- Bunny Hop: высота, тайминг, набор скорости ----------
+VIS.bh = { spd = nil, vz = AA_JUMP_VZ }
+function VIS.bhVz() return O.m_move_bunny_hop and (O.bhop_height or AA_JUMP_VZ) or AA_JUMP_VZ end
+-- «приземлились?» с учётом тайминга: Instant — ловим сам момент касания (за кадр до того, как игра
+-- поставит педа на землю и начнёт гасить скорость), Early — прыгаем ещё в воздухе за N см до земли
+function VIS.bhLand(inAir, x, y, z, vz)
+    if not inAir then return true end
+    local tm = O.bhop_timing or 0
+    if tm == 2 or vz > 0 then return false end
+    TR.T('bhop.groundz')
+    local h = z - getGroundZFor3dCoord(x, y, z) - 1.0         -- центр педа ~1 м над ступнями
+    local lim = (tm == 0 and 0.06 or (O.bhop_pre or 20) / 100) + (-vz) * 0.02   -- запас на один кадр падения
+    return h < lim
+end
+-- скорость очередного прыжка: базовая или с набором за каждый прыжок серии
+function VIS.bhSpeed(chain)
+    local base = O.bhop_speed or 12
+    if not O.bhop_gain or not chain or not VIS.bh.spd then VIS.bh.spd = base; return base end
+    VIS.bh.spd = math.min(math.max(O.bhop_max or 30, base), VIS.bh.spd * (1 + (O.bhop_gain_p or 8) / 100))
+    return VIS.bh.spd
 end
 
 -- управление в воздухе: Air Strafe (WASD рулит скоростью) и Strafe Assist (без клавиш — доворот к камере)
@@ -2093,7 +2126,8 @@ local function mvAir(I, speed)
     if O.m_move_bunny_hop and O.bhop_steer and I.jump then
         local ex, ey = bhopDir(I)
         if ex then
-            setCharVelocity(PLAYER_PED, ex * O.bhop_speed, ey * O.bhop_speed, vz)
+            local sp = VIS.bh.spd or O.bhop_speed
+            setCharVelocity(PLAYER_PED, ex * sp, ey * sp, vz)
             return
         end
     end
@@ -2131,12 +2165,15 @@ local function aaMoveTick(free, I)
     local inAir = isCharInAir(PLAYER_PED)
 
     -- прыжок по нажатию; с Bunny Hop — и при зажатой клавише (прыгает сразу при приземлении)
-    if I.jump and (not aaJumpHeld or O.m_move_bunny_hop) and not inAir and now - mvJumpT > 0.3 then
+    local bh = O.m_move_bunny_hop
+    if I.jump and (not aaJumpHeld or bh) and now - mvJumpT > (bh and 0.12 or 0.3)
+        and (bh and VIS.bhLand(inAir, x, y, z, vz) or not inAir) then
         local s = speed
-        if O.m_move_bunny_hop then s = math.max(s, math.sqrt(vx * vx + vy * vy)) end
+        if bh then s = math.max(s, math.sqrt(vx * vx + vy * vy)) end
         local ex, ey = nil, nil
-        if O.m_move_bunny_hop then ex, ey = bhopDir(I) end
-        if ex then mvDoJump(ex * O.bhop_speed, ey * O.bhop_speed) else mvDoJump(dx * s, dy * s) end
+        local sp = bh and VIS.bhSpeed(inAir or now - mvJumpT < 0.6) or 0
+        if bh then ex, ey = bhopDir(I); s = math.max(s, sp) end
+        if ex then mvDoJump(ex * sp, ey * sp, VIS.bhVz()) else mvDoJump(dx * s, dy * s, VIS.bhVz()) end
         aaPos = nil
         aaJumpHeld = I.jump
         return
@@ -2144,7 +2181,7 @@ local function aaMoveTick(free, I)
     aaJumpHeld = I.jump
     -- первые кадры прыжка игра может гасить вертикальную скорость — дожимаем, пока не оторвались
     if not inAir and now - mvJumpT < 0.15 then
-        setCharVelocity(PLAYER_PED, dx * speed, dy * speed, AA_JUMP_VZ)
+        setCharVelocity(PLAYER_PED, dx * speed, dy * speed, VIS.bh.vz)
         aaPos = nil
         return
     end
@@ -2251,16 +2288,24 @@ local function mvTick(free, I)
     -- Bunny Hop: держишь прыжок — прыгаем в момент приземления, сохраняя скорость полёта
     -- с банни-хопом прыжок делает скрипт (игровой прыжок блокируем, чтобы не мешал)
     if O.m_move_bunny_hop then setGameKeyState(BTN_JUMP, 0) end
-    if O.m_move_bunny_hop and I.jump and (mv.wasAir or not mv.jumpHeld) and not inAir and not water and now - mvJumpT > 0.2 then
+    if O.m_move_bunny_hop and I.jump and (mv.wasAir or inAir or not mv.jumpHeld) and not water and now - mvJumpT > 0.12
+        and VIS.bhLand(inAir, x, y, z, vz) then
+        local chain = mv.wasAir or inAir
+        local sp = VIS.bhSpeed(chain)
         local ex, ey = bhopDir(I)
         if ex then
-            mv.airVx, mv.airVy = ex * O.bhop_speed, ey * O.bhop_speed
-        elseif not mv.wasAir then
-            mv.airVx, mv.airVy = vx, vy       -- первый прыжок по инерции — с текущей скоростью бега
+            mv.airVx, mv.airVy = ex * sp, ey * sp
+        else
+            if not chain then mv.airVx, mv.airVy = vx, vy end   -- первый прыжок по инерции — с текущей скоростью бега
+            local hs2 = math.sqrt(mv.airVx * mv.airVx + mv.airVy * mv.airVy)
+            if hs2 > 0.5 then                                    -- Velocity: направление по инерции, скорость не ниже Hop Speed
+                local k = math.max(hs2, sp) / hs2
+                mv.airVx, mv.airVy = mv.airVx * k, mv.airVy * k
+            end
         end
-        mvDoJump(mv.airVx, mv.airVy)
+        mvDoJump(mv.airVx, mv.airVy, VIS.bhVz())
     elseif not inAir and now - mvJumpT < 0.15 then
-        setCharVelocity(PLAYER_PED, mv.airVx, mv.airVy, AA_JUMP_VZ)
+        setCharVelocity(PLAYER_PED, mv.airVx, mv.airVy, VIS.bh.vz)
     end
 
     if inAir and not water then
