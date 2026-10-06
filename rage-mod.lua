@@ -20,7 +20,7 @@
 
 script_name('rage-mod')
 script_author('rage-mod')
-script_version('4.8.1')
+script_version('4.8.2')
 
 local imgui    = require 'mimgui'
 local encoding = require 'encoding'
@@ -2306,6 +2306,21 @@ function RG.cam()
     return cx, cy, cz, dx / n, dy / n, dz / n
 end
 
+-- откуда реально летит пуля: от персонажа (уровень плеч/оружия), а НЕ от камеры.
+-- Камера в 3-м лице висит сбоку/сзади и «видит» цель из-за угла, когда сам персонаж за стеной.
+function RG.eye()
+    local x, y, z = getCharCoordinates(PLAYER_PED)
+    return x, y, z + 0.6
+end
+-- точка выстрела из bullet sync, если она адекватная (рядом с персонажем)
+function RG.originOf(data)
+    local o = data and data.origin
+    if not o then return RG.eye() end
+    local x, y, z = getCharCoordinates(PLAYER_PED)
+    if (o.x - x) ^ 2 + (o.y - y) ^ 2 + (o.z - z) ^ 2 > 9 then return RG.eye() end
+    return o.x, o.y, o.z
+end
+
 function RG.myId()
     local ok, id = sampGetPlayerIdByCharHandle(PLAYER_PED)
     return ok and id or -1
@@ -2327,10 +2342,11 @@ function RG.dmgOk(dmg, hp)
 end
 
 -- поиск цели: { id, ped, x, y, z, bp, hp, ang }
-function RG.find(weapon, strict)
+function RG.find(weapon, strict, ox, oy, oz)
     local dmg = RG.DMG[weapon]
     if not dmg then return nil end
     local cx, cy, cz, fx, fy, fz = RG.cam()
+    if not ox then ox, oy, oz = RG.eye() end
     local fov = O.rage_main_field_of_view or 180
     local walls = O.rage_main_aim_through_walls
     local prefer = O.rage_sel_prefer or 0
@@ -2364,7 +2380,7 @@ function RG.find(weapon, strict)
                             if dist > 0.5 and dist < 300 then
                                 local dot = (dx * fx + dy * fy + dz * fz) / dist
                                 local ang = math.deg(math.acos(math.max(-1, math.min(1, dot))))
-                                if ang <= fov and (walls or TR.T('rg.find.los') or isLineOfSightClear(cx, cy, cz, tx, ty, tz, true, true, false, true, false)) then
+                                if ang <= fov and (walls or TR.T('rg.find.los') or isLineOfSightClear(ox, oy, oz, tx, ty, tz, true, true, false, true, false)) then
                                     local score = (prefer == 0) and (hp * 1000 + ang) or ang
                                     if score < bestScore then
                                         bestScore = score
@@ -2421,7 +2437,8 @@ function RG.mbFind()
                         -- режим: 0 — только за стеной, 1 — всегда, 2 — только видимые
                         local okMode = mode == 1
                         if not okMode and ang <= fov and ang < bestAng then
-                            local los = isLineOfSightClear(cx, cy, cz, x, y, z + 0.6, true, false, false, true, false)
+                            local ex, ey, ez = RG.eye()
+                            local los = isLineOfSightClear(ex, ey, ez, x, y, z + 0.6, true, false, false, true, false)
                             okMode = (mode == 0 and not los) or (mode == 2 and los)
                         end
                         if okMode and ang <= fov and ang < bestAng then
@@ -2484,7 +2501,7 @@ function RG.onBullet(data)
     local hc = O.rage_sel_hit_chance or 0
     if silent and not tt and hc > 0 and math.random(100) > hc then return end
     -- триггер (в т.ч. «наперёд» — цель ещё за углом) приоритетнее: он уже решил, в кого стрелять
-    local t = tt or RG.find(w, false)
+    local t = tt or RG.find(w, false, RG.originOf(data))
     if not t then
         -- сайлент цель не нашёл (например, все за стеной) — пробуем Magic Bullet
         if RG.magic(data) then return end
@@ -2559,6 +2576,7 @@ function RG.tbFind(w)
     if okp and ping then pingL = ping / 1000 end
     -- своё движение: камеру сдвигаем вместе с педом (стрейф из-за стены)
     local mvx, mvy, mvz = getCharVelocity(PLAYER_PED)
+    local ex, ey, ez = RG.eye()           -- видимость считаем от персонажа, а не от камеры
     local predMs = O.tb_pred and (O.tb_pred_ms or 160) or 0
     local best, bestAng = nil, math.huge
     for id = 0, sampGetMaxPlayerId(false) do
@@ -2588,7 +2606,7 @@ function RG.tbFind(w)
                                     local r = clamp(650 / math.max(dist, 1), 6, 70)
                                     okHit = sx and VIS.xhx and ((sx - VIS.xhx) ^ 2 + (sy - VIS.xhy) ^ 2) <= r * r or false
                                 end
-                                if okHit and (walls or RG.los(cx, cy, cz, tx, ty, tz)) then hit, hitHb = true, i; break end
+                                if okHit and (walls or RG.los(ex, ey, ez, tx, ty, tz)) then hit, hitHb = true, i; break end
                             end
                         end
                         -- 2) стрельба наперёд: через сколько-то мс цель/мы выйдем из-за укрытия
@@ -2599,7 +2617,7 @@ function RG.tbFind(w)
                                 local steps = math.max(2, math.floor(predMs / 30))
                                 for k = 1, steps do
                                     local t = predMs / 1000 * k / steps
-                                    local ox, oy, oz = cx + mvx * t, cy + mvy * t, cz
+                                    local ox, oy, oz = ex + mvx * t, ey + mvy * t, ez
                                     for _, i in ipairs({ 2, 1 }) do
                                         local tx, ty, tz = RG.hbPoint(ped, i, t + pingL)
                                         if RG.los(ox, oy, oz, tx, ty, tz) then hit, hitHb, pred = true, i, true; break end
