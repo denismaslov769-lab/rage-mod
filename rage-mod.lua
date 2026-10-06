@@ -20,7 +20,7 @@
 
 script_name('rage-mod')
 script_author('rage-mod')
-script_version('4.8.6')
+script_version('4.8.7')
 
 local imgui    = require 'mimgui'
 local encoding = require 'encoding'
@@ -2764,7 +2764,8 @@ function RG.jaWindow() return O.ja_on and (O.ja_method2 or 0) ~= 1 and os.clock(
 -- цель выстрела Jump Attack (для подмены пули в onBullet)
 function RG.jaShotTarget()
     local ja = RG.ja
-    if not O.ja_on or not ja.t or os.clock() - ja.lastT > 0.2 then return nil end
+    if not O.ja_on or not ja.t or os.clock() - ja.lastT > 0.2 then ja.t = nil; return nil end
+    if not doesCharExist(ja.t.ped) then ja.t = nil; return nil end
     return ja.t
 end
 -- Выстрел самим движком: CWeapon::Fire (0x742300, GTA SA 1.0 US) с владельцем = наш пед.
@@ -2790,9 +2791,13 @@ function RG.jaEngineFire(w, ox, oy, oz, tx, ty, tz, tped)
     local te = 0
     if tped then local okp, pp = pcall(getCharPointer, tped); if okp and pp and pp ~= 0 then te = pp end end
     -- bool __thiscall CWeapon::Fire(CEntity* owner, CVector* origin, CVector* muzzle, CEntity* target, CVector* targetPos, CVector* driveBy)
+    local st0, tm0 = wt[1], wt[4]
     local r = callMethod(0x742300, wp, 6, 0, ped, base, base, te, base + 12, 0)
     r = r and bit.band(r, 0xFF) ~= 0
-    return r, 'fire=' .. tostring(r)
+    local st1, clip = wt[1], wt[2]
+    if clip > 0 then wt[1] = 0 end                            -- FIRING не оставляем: оружие снова «готово»
+    wt[4] = tm0                                               -- таймер выстрела как был
+    return r, ('fire=%s st %d->%d clip %d'):format(tostring(r), st0, st1, clip)
 end
 -- анимация выстрела верхней частью тела (ноги продолжают прыжок)
 RG.JA_ANIM = { [22] = { 'COLT45', 'colt45_fire' }, [23] = { 'SILENCED', 'Silence_fire' }, [24] = { 'PYTHON', 'python_fire' },
@@ -2848,7 +2853,7 @@ end
 -- Настоящий выстрел: игровой прыжок (CTaskSimpleJump) запрещает стрельбу, поэтому прыжок с оружием
 -- делает скрипт — скоростью, без задачи прыжка. Персонаж остаётся в обычной/прицельной задаче,
 -- и игра сама стреляет в воздухе: реальная пуля, реальный синк, реальный урон.
-function RG.jaJumpTick(free)
+function RG.jaJumpTick(free, autoAim)
     local ja = RG.ja
     local now = os.clock()
     if not isCharOnFoot(PLAYER_PED) or isCharInWater(PLAYER_PED) then ja.jumpHeld = false; return end
@@ -2869,7 +2874,7 @@ function RG.jaJumpTick(free)
     end
     ja.jumpHeld = jump
     -- в воздухе: если триггер хочет стрелять — сами держим прицел и огонь (без прицела в воздухе не выстрелить)
-    if inAir and O.tb_on and now - RG.tb.fireT < 0.05 then
+    if autoAim and inAir and O.tb_on and now - RG.tb.fireT < 0.05 then
         setGameKeyState(6, 255); setGameKeyState(17, 255)
     end
 end
@@ -2877,7 +2882,10 @@ function RG.jaTick(free)
     local ja = RG.ja
     if not O.ja_on or not free or not spawnedAt or os.clock() - spawnedAt < 5 then return end
     local method = O.ja_method2 or 0
-    if method == 1 then return RG.jaJumpTick(free) end
+    if method == 1 then return RG.jaJumpTick(free, true) end
+    -- движок отказывается стрелять из задачи игрового прыжка (поэтому без бхопа/аир-стрейфа не работало):
+    -- прыжок с оружием всегда делает скрипт, без задачи прыжка — и выстрел движком проходит стабильно
+    if method == 0 then RG.jaJumpTick(free, false) end
     if not isCharOnFoot(PLAYER_PED) or not isCharInAir(PLAYER_PED) or isCharInWater(PLAYER_PED) then return end
     local w = getCurrentCharWeapon(PLAYER_PED)
     local dmg = RG.DMG[w]
@@ -4735,7 +4743,8 @@ local qsPending, qsBusy = false, false
 function sampev.onSendBulletSync(data)
     if RG.ja.sending then return end      -- выстрел Jump Attack уже собран и доведён
     TR.E(('bullet w%d t%d air%s'):format(data.weaponId or -1, data.targetType or -1, tostring(isCharInAir(PLAYER_PED))))
-    pcall(RG.onBullet, data)
+    local okb, eb = pcall(RG.onBullet, data)
+    if not okb then TR.E('onBullet.err ' .. tostring(eb)) end
     pcall(VIS.btShot, data)
     pcall(VIS.ownShot, data)
     if O.aa_enable and O.aa_mode == 4 then aaFlickUntil = os.clock() + (O.aa_flick_ms or 200) / 1000 end
