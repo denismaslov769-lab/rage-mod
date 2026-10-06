@@ -20,7 +20,7 @@
 
 script_name('rage-mod')
 script_author('rage-mod')
-script_version('4.6.1')
+script_version('4.6.2')
 
 local imgui    = require 'mimgui'
 local encoding = require 'encoding'
@@ -1054,7 +1054,6 @@ local ROWS = {
     w_view = CARD('w_view', {
         CH('View Options', VIS.SUB_VIEW), CH('Lighting', VIS.SUB_LIGHT), CH('Sun & Clouds', VIS.SUB_SUN),
         CH('Weather & Time', VIS.SUB_WT), CH('Screen Effects', VIS.SUB_SCR), CH('Crosshair', VIS.SUB_XH),
-        CH('China Hat', VIS.SUB_HAT),
     }),
     w_hud = CARD('w_hud', {
         CH('Watermark', VIS.SUB_WM), T_('Keybinds List', true, 'hud_keys'), T_('Hide HUD', false, 'hud_hide'),
@@ -1066,7 +1065,7 @@ local ROWS = {
     }),
     w_misc = CARD('w_misc', {
         CH('Hit Marker', VIS.SUB_HM), CH('Bullet Tracers', VIS.SUB_TR), COL('Bullet Impacts', true, { 102, 124, 246 }),
-        T_('Kill Effect', true, 'sc_kill'), CH('Rainbow', VIS.SUB_RB),
+        T_('Kill Effect', true, 'sc_kill'), CH('Rainbow', VIS.SUB_RB), CH('China Hat', VIS.SUB_HAT),
     }),
     m_move = CARD('m_move', {
         CH('Bunny Hop', SUB_BHOP), T_('Air Strafe'), T_('Jump Bug'), T_('Standalone Quick Stop'),
@@ -2567,6 +2566,10 @@ function sampev.onBulletSync(playerId, data)
 end
 
 -- ---------- CHINA HAT (конус над головой; считаем в main-потоке, рисуем в OnFrame) ----------
+VIS.HAT_N = 24
+VIS.hatBuf = { ring = {}, segs = {} }
+for i = 1, VIS.HAT_N do VIS.hatBuf.ring[i] = { 0, 0, 0, (i - 1) / VIS.HAT_N }; VIS.hatBuf.segs[i] = { 0, 0, 0, 0 } end
+VIS.hatSort = function(a, b) return a[3] > b[3] end
 function VIS.hatTick(cx, cy, cz)
     VIS.hat = nil
     if not O.hat_on or not doesCharExist(PLAYER_PED) then return end
@@ -2575,30 +2578,33 @@ function VIS.hatTick(cx, cy, cz)
     local hx, hy, hz = VIS.bone(ptr, 8)
     if not hx or (hx == 0 and hy == 0 and hz == 0) then return end
     local d2 = (hx - cx) ^ 2 + (hy - cy) ^ 2 + (hz - cz) ^ 2
-    if O.hat_fp and d2 < 0.8 * 0.8 then return end      -- от первого лица шляпа закрыла бы экран
+    if O.hat_fp and d2 < 0.64 then return end           -- от первого лица шляпа закрыла бы экран
     local r, h = (O.hat_size or 42) / 100, (O.hat_height or 24) / 100
     local bz = hz + 0.14
-    local ax, ay = VIS.proj(hx, hy, bz + h)
-    if not ax then return end
-    local N, spin = 36, os.clock() * 0.8
-    local ring, dmin, dmax = {}, math.huge, 0
-    for i = 0, N - 1 do
-        local a = spin + i / N * 2 * math.pi
-        local px, py = hx + math.cos(a) * r, hy + math.sin(a) * r
-        local sx, sy = VIS.proj(px, py, bz)
-        if not sx then return end
-        local d = (px - cx) ^ 2 + (py - cy) ^ 2 + (bz - cz) ^ 2
-        dmin, dmax = math.min(dmin, d), math.max(dmax, d)
-        ring[i + 1] = { sx, sy, d, i / N }
-    end
-    local segs, span = {}, math.max(dmax - dmin, 1e-4)
+    -- одна проверка видимости на всю шляпу вместо проверки каждой точки
+    if not isPointOnScreen(hx, hy, bz, r + 0.2) then return end
+    local B, N = VIS.hatBuf, VIS.HAT_N
+    B.ax, B.ay = convert3DCoordsToScreen(hx, hy, bz + h)
+    local spin, step = os.clock() * 0.8, 2 * math.pi / N
+    local dmin, dmax = math.huge, 0
     for i = 1, N do
-        local p, q = ring[i], ring[i % N + 1]
-        local d = (p[3] + q[3]) * 0.5
-        segs[i] = { p, q, d, 1 - (d - dmin) / span }
+        local a = spin + (i - 1) * step
+        local px, py = hx + math.cos(a) * r, hy + math.sin(a) * r
+        local p = B.ring[i]
+        p[1], p[2] = convert3DCoordsToScreen(px, py, bz)
+        local d = (px - cx) ^ 2 + (py - cy) ^ 2 + (bz - cz) ^ 2
+        p[3] = d
+        if d < dmin then dmin = d end
+        if d > dmax then dmax = d end
     end
-    table.sort(segs, function(a, b) return a[3] > b[3] end)   -- дальние сначала
-    VIS.hat = { ax = ax, ay = ay, ring = ring, segs = segs }
+    local span = math.max(dmax - dmin, 1e-4)
+    for i = 1, N do
+        local p, q, sg = B.ring[i], B.ring[i % N + 1], B.segs[i]
+        local d = (p[3] + q[3]) * 0.5
+        sg[1], sg[2], sg[3], sg[4] = p, q, d, 1 - (d - dmin) / span
+    end
+    table.sort(B.segs, VIS.hatSort)                     -- дальние сначала
+    VIS.hat = B
 end
 function VIS.drawHat(dl)
     local h = VIS.hat
@@ -2907,9 +2913,9 @@ end
 -- пересчитывала m_CurrentColours и затирала своё небо / тени. Update = CalcColoursForPoint(камера).
 VIS.TC_UPDATE = 0x561760
 function VIS.tcFreeze(on)
-    local mem = require 'memory'
     if on == (VIS.tcState == 'frozen') then return end
     if VIS.tcState == 'bad' and on then return end
+    local mem = require 'memory'
     local A = VIS.TC_UPDATE
     if on then
         local pre, first = mem.getuint8(A - 1, true), mem.getuint8(A, true)
@@ -2928,75 +2934,82 @@ function VIS.tcFreeze(on)
 end
 
 -- ---------- небо / туман / свет (CTimeCycle::m_CurrentColours 0xB7C4A0, GTA SA 1.0 US) ----------
+-- указатели на CTimeCycle::m_CurrentColours создаём один раз (ffi.cast каждый кадр = мусор для GC)
+VIS.TCP = {
+    i16 = ffi.cast('int16_t*', 0xB7C4A0),   -- индекс = (адрес - 0xB7C4A0) / 2
+    f32 = ffi.cast('float*', 0xB7C4A0),     -- индекс = (адрес - 0xB7C4A0) / 4
+    grey = ffi.cast('uint8_t*', 0xB7CB10),  -- m_BelowHorizonGrey
+    set = ffi.cast('void*', 0xB7C4A0),
+}
 function VIS.tc16(addr, c)
-    local p = ffi.cast('int16_t*', addr)
-    p[0], p[1], p[2] = c[1], c[2], c[3]
+    local p, k = VIS.TCP.i16, (addr - 0xB7C4A0) / 2
+    p[k], p[k + 1], p[k + 2] = c[1], c[2], c[3]
 end
 function VIS.tcF(addr, c, alpha, mul)
-    local p = ffi.cast('float*', addr)
+    local p, k = VIS.TCP.f32, (addr - 0xB7C4A0) / 4
     mul = mul or 1
-    p[0], p[1], p[2] = c[1] * mul, c[2] * mul, c[3] * mul
-    if alpha then p[3] = c[4] or 255 end
+    p[k], p[k + 1], p[k + 2] = c[1] * mul, c[2] * mul, c[3] * mul
+    if alpha then p[k + 3] = c[4] or 255 end
 end
 -- CTimeCycle::CalcColoursForPoint(CVector point, CColourSet* set) — 0x5603D0, cdecl, CVector по значению
-function VIS.tcRecalc()
-    if not VIS.calcColours then
-        VIS.calcColours = ffi.cast('void(__cdecl*)(float, float, float, void*)', 0x5603D0)
-    end
-    local cx, cy, cz = getActiveCameraCoordinates()
-    VIS.calcColours(cx, cy, cz, ffi.cast('void*', 0xB7C4A0))
-end
-function VIS.timecycTick()
+VIS.calcColours = ffi.cast('void(__cdecl*)(float, float, float, void*)', 0x5603D0)
+VIS.tcLast = 0
+function VIS.timecycTick(now)
     local need = O.fog_on or O.sky_on or O.sun_on or O.cl_on or O.amb_on or O.flt_on or O.wat_on or O.shd_on
     VIS.tcFreeze(need and true or false)
     if not need or VIS.tcState ~= 'frozen' then return end
-    -- Update игры заморожен, поэтому каждый кадр сами считаем «родные» цвета (время суток, погода, зоны)
-    -- и поверх пишем только включённые опции. Выключил опцию — сразу вернулись игровые значения,
-    -- а не застывшие последние.
-    VIS.tcRecalc()
+    -- Update игры заморожен — «родные» цвета (время суток, погода, зоны) пересчитываем сами,
+    -- но не каждый кадр, а ~12 раз в секунду: они меняются медленно, а расчёт недешёвый.
+    -- Наши значения пишем каждый кадр (это просто запись в память) — радуга остаётся плавной.
+    if now - VIS.tcLast > 0.08 or now < VIS.tcLast then
+        VIS.tcLast = now
+        local cx, cy, cz = getActiveCameraCoordinates()
+        VIS.calcColours(cx, cy, cz, VIS.TCP.set)
+    end
+    local f = VIS.TCP.f32
     if O.fog_on then
-        ffi.cast('float*', 0xB7C4F0)[0] = O.fog_far or 900
-        ffi.cast('float*', 0xB7C4F4)[0] = math.min(O.fog_start or 250, (O.fog_far or 900) - 10)
+        f[20] = O.fog_far or 900                                      -- 0xB7C4F0 m_fFarClip
+        f[21] = math.min(O.fog_start or 250, (O.fog_far or 900) - 10) -- 0xB7C4F4 m_fFogStart
     end
     if O.sky_on then
         VIS.tc16(0xB7C4C4, VIS.rgb('sky_top'))
         local b = VIS.rgb('sky_bot')
         VIS.tc16(0xB7C4CA, b)
-        -- цвет «под горизонтом» (низ неба / дальний туман) Update тоже не пересчитает — пишем сами
-        local g = ffi.cast('uint8_t*', 0xB7CB10)
+        local g = VIS.TCP.grey
         g[0], g[1], g[2] = b[1], b[2], b[3]
     end
     if O.sun_on then
         VIS.tc16(0xB7C4D0, VIS.rgb('sun_core'))
         VIS.tc16(0xB7C4D6, VIS.rgb('sun_halo'))
-        ffi.cast('float*', 0xB7C4DC)[0] = O.sun_size or 6
+        f[15] = O.sun_size or 6                                        -- 0xB7C4DC
     end
     if O.cl_on then
         VIS.tc16(0xB7C4FC, VIS.rgb('cl_low'))
         VIS.tc16(0xB7C502, VIS.rgb('cl_fluffy'))
-        ffi.cast('float*', 0xB7C538)[0] = O.cl_alpha or 200
+        f[38] = O.cl_alpha or 200                                      -- 0xB7C538
     end
     if O.amb_on then
         local m = (O.amb_pow or 100) / 100 / 255
-        VIS.tcF(0xB7C4A0, VIS.rgb('amb_c'), false, m)
-        VIS.tcF(0xB7C4AC, VIS.rgb('amb_c'), false, m)
+        local c = VIS.rgb('amb_c')
+        VIS.tcF(0xB7C4A0, c, false, m)
+        VIS.tcF(0xB7C4AC, c, false, m)
     end
     if O.flt_on then
-        VIS.tcF(0xB7C518, VIS.rgb('flt_c'), true)
-        VIS.tcF(0xB7C528, VIS.rgb('flt_c'), true)
+        local c = VIS.rgb('flt_c')
+        VIS.tcF(0xB7C518, c, true)
+        VIS.tcF(0xB7C528, c, true)
     end
     if O.wat_on then VIS.tcF(0xB7C508, VIS.rgb('wat_c'), true) end
     if O.shd_on then
-        -- m_nShadowStrength / m_nLightShadowStrength / m_nPoleShadowStrength
-        local sp = ffi.cast('int16_t*', 0xB7C4E8)
-        sp[0], sp[1], sp[2] = O.shd_val or 160, O.shd_light or 160, O.shd_pole or 160
+        local p = VIS.TCP.i16                                          -- 0xB7C4E8 / EA / EC
+        p[36], p[37], p[38] = O.shd_val or 160, O.shd_light or 160, O.shd_pole or 160
     end
 end
 
 -- ---------- состояние мира (main-поток) ----------
 function VIS.worldTick(now)
     local st = VIS.st
-    local okt, et = pcall(VIS.timecycTick)
+    local okt, et = pcall(VIS.timecycTick, now)
     if not okt and not st.tcErr then st.tcErr = true; TR.T('vis.tc ' .. tostring(et)) end
     if st.nv ~= (O.v_nv or false) then st.nv = O.v_nv or false; pcall(setNightVision, st.nv) end
     if st.ir ~= (O.v_ir or false) then st.ir = O.v_ir or false; pcall(setInfraredVision, st.ir) end
@@ -3004,9 +3017,11 @@ function VIS.worldTick(now)
     if st.radar ~= (O.hud_radar or false) then st.radar = O.hud_radar or false; pcall(displayRadar, not st.radar) end
     if O.wt_on then
         if st.w == nil then st.wOrig = VIS.srvWeather or ffi.cast('int16_t*', 0xC81320)[0] end
-        if st.w ~= O.wt_weather or now - (st.wt or 0) > 2 then
+        -- forceWeatherNow перезагружает погоду (фриз) — зовём только если погода реально сбита
+        local want = VIS.WEATHER_ID[O.wt_weather + 1] or 1
+        if st.w ~= O.wt_weather or (now - (st.wt or 0) > 3 and ffi.cast('int16_t*', 0xC8131C)[0] ~= want) then
             st.w, st.wt = O.wt_weather, now
-            pcall(forceWeatherNow, VIS.WEATHER_ID[O.wt_weather + 1] or 1)
+            pcall(forceWeatherNow, want)
         end
     elseif st.w ~= nil then
         -- выключили: возвращаем погоду сервера (или ту, что была до включения)
@@ -3019,7 +3034,10 @@ function VIS.worldTick(now)
             local okt, h, m = pcall(getTimeOfDay)
             st.tOrig = okt and { h, m } or nil
         end
-        pcall(setTimeOfDay, O.wt_hour or 12, O.wt_min or 0)
+        local hh, mm = O.wt_hour or 12, O.wt_min or 0
+        local clk = VIS.clk or ffi.cast('uint8_t*', 0xB70152)          -- CClock: минуты, часы
+        VIS.clk = clk
+        if clk[0] ~= mm or clk[1] ~= hh then pcall(setTimeOfDay, hh, mm) end
     elseif st.tOn then
         st.tOn = false
         local t = VIS.srvTime or st.tOrig
@@ -3028,7 +3046,11 @@ function VIS.worldTick(now)
     if O.v_fov_on and doesCharExist(PLAYER_PED) then
         local w = getCurrentCharWeapon(PLAYER_PED)
         local scoped = isKeyDown(0x02) and (w == 34 or w == 35 or w == 36 or w == 43)
-        if not scoped then pcall(cameraSetLerpFov, O.v_fov, O.v_fov, 1000, true) end
+        if not scoped and (st.fovV ~= O.v_fov or st.fovS or now - (st.fovT or 0) > 0.5) then
+            st.fovV, st.fovT = O.v_fov, now
+            pcall(cameraSetLerpFov, O.v_fov, O.v_fov, 1000, true)
+        end
+        st.fovS = scoped
         st.fov = true
     elseif st.fov then
         -- выключили Override FOV: снимаем зафиксированный скриптом FOV
