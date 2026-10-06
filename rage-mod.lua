@@ -20,7 +20,7 @@
 
 script_name('rage-mod')
 script_author('rage-mod')
-script_version('4.8.3')
+script_version('4.8.4')
 
 local imgui    = require 'mimgui'
 local encoding = require 'encoding'
@@ -62,17 +62,26 @@ end
 -- ---------- трассировка для поиска краша ----------
 -- последние действия скрипта пишутся в moonloader\rage-mod-trace.txt (раз в 0.2 с).
 -- После вылета этот файл покажет, что скрипт делал прямо перед крашем.
-local TR = { buf = {}, n = 0, last = 0 }
+local TR = { buf = {}, n = 0, last = 0, ev = {} }
 function TR.T(what)
     TR.n = TR.n + 1
     TR.buf[(TR.n - 1) % 40 + 1] = ('%.3f %s'):format(os.clock(), what)
+end
+-- важные события (выстрелы, ошибки): последние 80, пишутся в начало трейса
+function TR.E(what)
+    TR.T(what)
+    local e = TR.ev
+    e[#e + 1] = ('%.3f %s'):format(os.clock(), what)
+    if #e > 80 then table.remove(e, 1) end
 end
 function TR.flush()
     if os.clock() - TR.last < 0.2 then return end
     TR.last = os.clock()
     local f = io.open(getWorkingDirectory() .. '\\rage-mod-trace.txt', 'w')
     if not f then return end
-    f:write('rage-mod ', thisScript().version, '\n')
+    f:write('rage-mod ', thisScript().version, '\n-- events --\n')
+    for _, l in ipairs(TR.ev) do f:write(l, '\n') end
+    f:write('-- frames --\n')
     for i = math.max(1, TR.n - 39), TR.n do f:write(TR.buf[(i - 1) % 40 + 1] or '', '\n') end
     f:close()
 end
@@ -250,6 +259,8 @@ local RU = {
     ['On Release'] = 'При отпускании', ['Shot or Release'] = 'Выстрел или отпускание', ['Method'] = 'Способ',
     ['Run Back'] = 'Бегом', ['Teleport'] = 'Телепорт', ['Return Speed'] = 'Скорость возврата',
     ['Show Position'] = 'Показывать точку', ['Through Walls'] = 'Сквозь стены',
+    ['Real Shot (scripted jump)'] = 'Настоящий выстрел (свой прыжок)', ['Packet (fake)'] = 'Пакетом (фейк)',
+    ['Jump Power'] = 'Сила прыжка',
     ['Jump Attack'] = 'Стрельба в прыжке', ['JUMP ATTACK'] = 'СТРЕЛЬБА В ПРЫЖКЕ', ['Fire From'] = 'Чем стрелять',
     ['On Click'] = 'По клику (ЛКМ)', ['With Trigger Bot'] = 'Триггерботом', ['Click or Trigger'] = 'ЛКМ или триггер',
     ['Need Target'] = 'Только при наличии цели', ['Fire Rate'] = 'Скорострельность', ['Use Ammo'] = 'Тратить патроны',
@@ -1052,6 +1063,8 @@ VIS.SUB_QP = { title = 'QUICK PEEK ASSIST', rows = CARD('qp', {
 -- Jump Attack: в прыжке игра стрелять не даёт — выстрел (bullet sync + урон) отправляет скрипт
 VIS.SUB_JA = { title = 'JUMP ATTACK', rows = CARD('ja', {
     T_('Enabled', false, 'ja_on'),
+    SEL('Method', { 'Real Shot (scripted jump)', 'Packet (fake)' }, 0, 'ja_method'),
+    SL('Jump Power', 3, 9, 5.5, '%.1f', true, 'ja_power'),
     SEL('Fire From', { 'On Click', 'With Trigger Bot', 'Click or Trigger' }, 2, 'ja_src'),
     T_('Need Target', true, 'ja_need'),
     SL('Fire Rate', 50, 200, 100, '%d%%', false, 'ja_rate'),
@@ -2747,7 +2760,7 @@ end
 RG.JA_RATE = { [22] = 0.25, [23] = 0.4, [24] = 0.8, [25] = 1.0, [26] = 0.3, [27] = 0.35, [28] = 0.07, [29] = 0.09,
                [30] = 0.11, [31] = 0.11, [32] = 0.07, [33] = 1.0, [34] = 1.2, [38] = 0.03 }
 RG.ja = { lastT = 0, sending = false, warned = false }
-function RG.jaWindow() return O.ja_on and os.clock() - RG.ja.lastT < 0.25 end
+function RG.jaWindow() return O.ja_on and (O.ja_method or 0) == 1 and os.clock() - RG.ja.lastT < 0.25 end
 -- анимация выстрела верхней частью тела (ноги продолжают прыжок)
 RG.JA_ANIM = { [22] = { 'COLT45', 'colt45_fire' }, [23] = { 'SILENCED', 'Silence_fire' }, [24] = { 'PYTHON', 'python_fire' },
     [25] = { 'SHOTGUN', 'shotgun_fire' }, [26] = { 'COLT45', 'colt45_fire' }, [27] = { 'BUDDY', 'buddy_fire' },
@@ -2799,9 +2812,38 @@ function RG.jaSendBullet(d)
     raknetDeleteBitStream(bs)
     if not ok then error(e) end
 end
+-- Настоящий выстрел: игровой прыжок (CTaskSimpleJump) запрещает стрельбу, поэтому прыжок с оружием
+-- делает скрипт — скоростью, без задачи прыжка. Персонаж остаётся в обычной/прицельной задаче,
+-- и игра сама стреляет в воздухе: реальная пуля, реальный синк, реальный урон.
+function RG.jaJumpTick(free)
+    local ja = RG.ja
+    local now = os.clock()
+    if not isCharOnFoot(PLAYER_PED) or isCharInWater(PLAYER_PED) then ja.jumpHeld = false; return end
+    if not RG.DMG[getCurrentCharWeapon(PLAYER_PED)] then ja.jumpHeld = false; return end
+    if O.m_move_bunny_hop or localSpinning then return end     -- там прыжок и так делает скрипт
+    local jump = free and (isKeyDown(0x20) or isButtonPressed(PLAYER_HANDLE, BTN_JUMP))
+    if jump then setGameKeyState(BTN_JUMP, 0) end              -- игровой прыжок не даём
+    local inAir = isCharInAir(PLAYER_PED)
+    if jump and not ja.jumpHeld and not inAir and now - (ja.jumpT or 0) > 0.35 then
+        local vx, vy = getCharVelocity(PLAYER_PED)
+        ja.jumpT, ja.jvx, ja.jvy = now, vx, vy
+        local p = pedPos()
+        if p then p[2] = p[2] + 0.15 end                       -- отрываем от земли (снимается флаг «стоит»)
+        setCharVelocity(PLAYER_PED, vx, vy, O.ja_power or 5.5)
+        TR.E('ja.jump')
+    elseif ja.jumpT and now - ja.jumpT < 0.12 and not inAir then
+        setCharVelocity(PLAYER_PED, ja.jvx or 0, ja.jvy or 0, O.ja_power or 5.5)   -- первые кадры игра «прижимает» к земле
+    end
+    ja.jumpHeld = jump
+    -- в воздухе: если триггер хочет стрелять — сами держим прицел и огонь (без прицела в воздухе не выстрелить)
+    if inAir and O.tb_on and now - RG.tb.fireT < 0.05 then
+        setGameKeyState(6, 255); setGameKeyState(17, 255)
+    end
+end
 function RG.jaTick(free)
     local ja = RG.ja
     if not O.ja_on or not free or not spawnedAt or os.clock() - spawnedAt < 5 then return end
+    if (O.ja_method or 0) == 0 then return RG.jaJumpTick(free) end
     if not isCharOnFoot(PLAYER_PED) or not isCharInAir(PLAYER_PED) or isCharInWater(PLAYER_PED) then return end
     local w = getCurrentCharWeapon(PLAYER_PED)
     local dmg = RG.DMG[w]
@@ -2844,14 +2886,14 @@ function RG.jaTick(free)
     pcall(sampForceAimSync)
     local okb, eb = pcall(RG.jaSendBullet, d)
     if not okb then
-        TR.T('ja.err ' .. tostring(eb))
+        TR.E('ja.err ' .. tostring(eb))
         if not ja.warned then ja.warned = true; chat('Jump Attack: не удалось отправить выстрел (нужен SAMPFUNCS)') end
         return
     end
     if O.ja_ammo then pcall(setCharAmmo, PLAYER_PED, w, ammo - 1) end
     RG.qp.shotT = now
     pcall(VIS.ownShot, d)
-    TR.T('ja.shot ' .. tostring(d.targetId))
+    TR.E('ja.shot ' .. tostring(d.targetId))
     if t then
         local id, bp = t.id, t.bp
         if bit.band(O.m_feat_log_events or 0, 1) ~= 0 then
@@ -2872,9 +2914,9 @@ end
 function RG.tick(free)
     pcall(RG.qpTick, free)
     local okt, et = pcall(RG.tbTick, free)
-    if not okt then TR.T('tb.err ' .. tostring(et)) end
+    if not okt then TR.E('tb.err ' .. tostring(et)) end
     local okj, ej = pcall(RG.jaTick, free)
-    if not okj then TR.T('ja.err ' .. tostring(ej)) end
+    if not okj then TR.E('ja.err ' .. tostring(ej)) end
     if not RG.on() or not free or not spawnedAt or os.clock() - spawnedAt < 5 then return end
     if not isCharOnFoot(PLAYER_PED) then return end
     local w = getCurrentCharWeapon(PLAYER_PED)
@@ -4649,7 +4691,7 @@ local qsPending, qsBusy = false, false
 
 function sampev.onSendBulletSync(data)
     if RG.ja.sending then return end      -- выстрел Jump Attack уже собран и доведён
-    TR.T('bulletsync')
+    TR.E(('bullet w%d t%d air%s'):format(data.weaponId or -1, data.targetType or -1, tostring(isCharInAir(PLAYER_PED))))
     pcall(RG.onBullet, data)
     pcall(VIS.btShot, data)
     pcall(VIS.ownShot, data)
