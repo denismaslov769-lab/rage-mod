@@ -20,7 +20,7 @@
 
 script_name('rage-mod')
 script_author('rage-mod')
-script_version('4.7.1')
+script_version('4.8.0')
 
 local imgui    = require 'mimgui'
 local encoding = require 'encoding'
@@ -242,6 +242,14 @@ local RU = {
     ['Quick Switch'] = 'Быстрая смена', ['Super Toss'] = 'Супер-бросок', ['Knife Bot'] = 'Нож-бот',
     ['Prevent AFK Kick'] = 'Анти-AFK', ['Hit Sound'] = 'Звук попадания', ['Automatic Purchase'] = 'Автозакупка',
     ['Automatic Grenade Release'] = 'Автобросок гранаты', ['Auto-Accept Matchmaking'] = 'Автопринятие игры',
+    ['Trigger Bot'] = 'Триггербот', ['TRIGGER BOT'] = 'ТРИГГЕРБОТ', ['QUICK PEEK ASSIST'] = 'БЫСТРЫЙ ПИК',
+    ['On Aim'] = 'При прицеливании', ['Key'] = 'Клавиша', ['Hit Check'] = 'Проверка попадания',
+    ['Visible (Silent)'] = 'Видимая цель (сайлент)', ['Delay'] = 'Задержка', ['Redirect Shot'] = 'Доводить пулю в цель',
+    ['Fire Ahead'] = 'Стрельба наперёд', ['Prediction'] = 'Упреждение', ['Skip Teammates'] = 'Не стрелять по своим',
+    ['Force Aim'] = 'Сам доставать прицел', ['Return'] = 'Возврат', ['After Shot'] = 'После выстрела',
+    ['On Release'] = 'При отпускании', ['Shot or Release'] = 'Выстрел или отпускание', ['Method'] = 'Способ',
+    ['Run Back'] = 'Бегом', ['Teleport'] = 'Телепорт', ['Return Speed'] = 'Скорость возврата',
+    ['Show Position'] = 'Показывать точку', ['Through Walls'] = 'Сквозь стены',
     ['Log Events'] = 'Лог событий', ['Mode'] = 'Режим', ['Spin Speed'] = 'Скорость вращения',
     ['Jitter Range'] = 'Диапазон джиттера', ['Disable While Aiming'] = 'Откл. при прицеливании',
     ['Toggle Key'] = 'Клавиша', ['Show Locally'] = 'Показывать у себя', ['Force Sync'] = 'Частая синхронизация',
@@ -1010,9 +1018,37 @@ VIS.SUB_MB = { title = 'MAGIC BULLET', rows = CARD('mb', {
     SL('Hit Chance', 0, 100, 100, '%d%%', false, 'mb_hc'),
     T_('Skip Teammates', true, 'mb_team'),
 }) }
+-- клавиши для триггербота / quick peek
+VIS.KEYS_N = { 'Mouse 4', 'Mouse 5', 'Left Alt', 'Left Shift', 'X', 'C', 'V', 'E', 'Q', 'Caps Lock' }
+VIS.KEYS_C = { 0x05, 0x06, 0xA4, 0xA0, 0x58, 0x43, 0x56, 0x45, 0x51, 0x14 }
+-- Trigger Bot: стреляет сам, как только цель можно поразить (каждый кадр, без троттлинга)
+VIS.SUB_TB = { title = 'TRIGGER BOT', rows = CARD('tb', {
+    T_('Enabled', false, 'tb_on'),
+    SEL('Activation', { 'Always', 'On Aim', 'On Key' }, 0, 'tb_act'),
+    SEL('Key', VIS.KEYS_N, 0, 'tb_key'),
+    SEL('Hit Check', { 'Visible (Silent)', 'Crosshair' }, 0, 'tb_check'),
+    SL('Delay', 0, 300, 0, '%d ms', false, 'tb_delay'),
+    T_('Redirect Shot', true, 'tb_redirect'),
+    T_('Fire Ahead', true, 'tb_pred'),
+    SL('Prediction', 30, 400, 160, '%d ms', false, 'tb_pred_ms'),
+    SL('Max Distance', 10, 300, 150, '%d m', false, 'tb_dist'),
+    T_('Through Walls', false, 'tb_walls'),
+    T_('Force Aim', false, 'tb_aim'),
+    T_('Skip Teammates', true, 'tb_team'),
+    T_('Quick Stop', false, 'tb_qstop'),
+}) }
+-- Quick Peek Assist: держишь клавишу — запоминается точка; после выстрела / отпускания — возврат на неё
+VIS.SUB_QP = { title = 'QUICK PEEK ASSIST', rows = CARD('qp', {
+    T_('Enabled', false, 'qp_on'),
+    SEL('Key', VIS.KEYS_N, 0, 'qp_key'),
+    SEL('Return', { 'After Shot', 'On Release', 'Shot or Release' }, 2, 'qp_ret'),
+    SEL('Method', { 'Run Back', 'Teleport' }, 0, 'qp_method'),
+    SL('Return Speed', 5, 25, 12, '%d', false, 'qp_speed'),
+    COL('Show Position', true, { 102, 124, 246 }, 'qp_show'),
+}) }
 local ROWS = {
     rage_main = CARD('rage_main', {
-        T_('Enabled'), T_('Silent Aim', true), T_('Automatic Fire', true), T_('Aim Through Walls', true),
+        T_('Enabled'), T_('Silent Aim', true), CH('Trigger Bot', VIS.SUB_TB), T_('Aim Through Walls', true),
         SEL('Refine Shot', { 'Off', 'Latency', 'Performance' }, 1),
         SL('Field of View', 0, 180, 180, '%.1f°', true),
     }),
@@ -1020,7 +1056,7 @@ local ROWS = {
         CH('Backtrack', VIS.SUB_BT),
         SEL('Delay Shot', { 'Off', 'Damage', 'Accuracy' }, 1),
         SEL('Remove Spread', { 'Off', 'Partial', 'Full' }, 2),
-        CH('Magic Bullet', VIS.SUB_MB), DIS('Quick Peek Assist'), T_('Double Tap'),
+        CH('Magic Bullet', VIS.SUB_MB), CH('Quick Peek Assist', VIS.SUB_QP), T_('Double Tap'),
     }),
     rage_sel = CARD('rage_sel', {
         SEL('Prefer', { 'Damage', 'Accuracy', 'Head', 'Body' }, 0),
@@ -2424,15 +2460,20 @@ end
 
 -- выстрел ушёл: подменяем пулю на попадание по цели и отправляем урон
 function RG.onBullet(data)
-    -- сайлент выключен — работает только Magic Bullet (если включён)
-    if not RG.on() or not O.rage_main_silent_aim or not spawnedAt then RG.magic(data); return end
-    if (O.mb_mode or 1) ~= 0 and RG.magic(data) then return end
+    RG.qp.shotT = os.clock()
+    if not spawnedAt then return end
+    local silent = RG.on() and O.rage_main_silent_aim
+    local tt = RG.tbShotTarget()      -- цель триггербота (nil, если выстрел не от него)
+    -- ни сайлента, ни триггера — работает только Magic Bullet (если включён)
+    if not silent and not tt then RG.magic(data); return end
+    if not tt and (O.mb_mode or 1) ~= 0 and RG.magic(data) then return end
     local w = getCurrentCharWeapon(PLAYER_PED)
     local dmg = RG.DMG[w]
     if not dmg then return end
     local hc = O.rage_sel_hit_chance or 0
-    if hc > 0 and math.random(100) > hc then return end
-    local t = RG.find(w, false)
+    if silent and not tt and hc > 0 and math.random(100) > hc then return end
+    -- триггер (в т.ч. «наперёд» — цель ещё за углом) приоритетнее: он уже решил, в кого стрелять
+    local t = tt or RG.find(w, false)
     if not t then
         -- сайлент цель не нашёл (например, все за стеной) — пробуем Magic Bullet
         if RG.magic(data) then return end
@@ -2476,15 +2517,214 @@ function RG.onBullet(data)
     end)
 end
 
--- каждый кадр: Automatic Fire / Quick Scope / Quick Stop
+-- ---------- TRIGGER BOT ----------
+RG.tb = { fireT = 0, seenT = nil, id = nil, hb = 2, pred = false }
+-- точка хитбокса i у педа (с упреждением на t секунд по скорости)
+function RG.hbPoint(ped, i, t)
+    local x, y, z = getCharCoordinates(ped)
+    if t and t > 0 then
+        local vx, vy, vz = getCharVelocity(ped)
+        x, y, z = x + vx * t, y + vy * t, z + vz * t * 0.5
+    end
+    local hb = RG.HB[i]
+    local h = math.rad(getCharHeading(ped))
+    return x + math.cos(h) * hb.side, y + math.sin(h) * hb.side, z + hb.dz, x, y, z, hb.bp
+end
+function RG.los(ax, ay, az, bx, by, bz)
+    return isLineOfSightClear(ax, ay, az, bx, by, bz, true, false, false, true, false)
+end
+-- поиск цели для триггера: { id, ped, hb, ang, pred }
+function RG.tbFind(w)
+    local cx, cy, cz, fx, fy, fz = RG.cam()
+    local myId = RG.myId()
+    local okc, myCol = pcall(sampGetPlayerColor, myId)
+    local maxd = O.tb_dist or 150
+    local mask = O.rage_sel_hitboxes or 0x07
+    if mask == 0 then mask = 0x07 end
+    local cross = (O.tb_check or 0) == 1
+    local walls = O.tb_walls
+    local pingL = 0
+    local okp, ping = pcall(sampGetPlayerPing, myId)
+    if okp and ping then pingL = ping / 1000 end
+    -- своё движение: камеру сдвигаем вместе с педом (стрейф из-за стены)
+    local mvx, mvy, mvz = getCharVelocity(PLAYER_PED)
+    local predMs = O.tb_pred and (O.tb_pred_ms or 160) or 0
+    local best, bestAng = nil, math.huge
+    for id = 0, sampGetMaxPlayerId(false) do
+        if id ~= myId and sampIsPlayerConnected(id) then
+            local ok, ped = sampGetCharHandleBySampPlayerId(id)
+            if ok and doesCharExist(ped) and not isCharDead(ped) and sampGetPlayerHealth(id) > 0 then
+                local team = false
+                if O.tb_team and okc then
+                    local okq, pc = pcall(sampGetPlayerColor, id)
+                    team = okq and pc == myCol
+                end
+                local x, y, z = getCharCoordinates(ped)
+                local dx, dy, dz = x - cx, y - cy, z - cz
+                local dist = math.sqrt(dx * dx + dy * dy + dz * dz)
+                if not team and dist > 0.5 and dist <= maxd then
+                    local dot = (dx * fx + dy * fy + dz * fz) / dist
+                    local ang = math.deg(math.acos(math.max(-1, math.min(1, dot))))
+                    if ang < bestAng then
+                        local hit, hitHb, pred = false, nil, false
+                        -- 1) можно попасть прямо сейчас
+                        for i = 1, 6 do
+                            if bit.band(mask, bit.lshift(1, i - 1)) ~= 0 then
+                                local tx, ty, tz = RG.hbPoint(ped, i, pingL)
+                                local okHit = true
+                                if cross then
+                                    local sx, sy = VIS.proj(tx, ty, tz)
+                                    local r = clamp(650 / math.max(dist, 1), 6, 70)
+                                    okHit = sx and VIS.xhx and ((sx - VIS.xhx) ^ 2 + (sy - VIS.xhy) ^ 2) <= r * r or false
+                                end
+                                if okHit and (walls or RG.los(cx, cy, cz, tx, ty, tz)) then hit, hitHb = true, i; break end
+                            end
+                        end
+                        -- 2) стрельба наперёд: через сколько-то мс цель/мы выйдем из-за укрытия
+                        if not hit and predMs > 0 and not cross then
+                            local tvx, tvy = getCharVelocity(ped)
+                            local moving = mvx * mvx + mvy * mvy > 0.5 or tvx * tvx + tvy * tvy > 0.5
+                            if moving then
+                                local steps = math.max(2, math.floor(predMs / 30))
+                                for k = 1, steps do
+                                    local t = predMs / 1000 * k / steps
+                                    local ox, oy, oz = cx + mvx * t, cy + mvy * t, cz
+                                    for _, i in ipairs({ 2, 1 }) do
+                                        local tx, ty, tz = RG.hbPoint(ped, i, t + pingL)
+                                        if RG.los(ox, oy, oz, tx, ty, tz) then hit, hitHb, pred = true, i, true; break end
+                                    end
+                                    if hit then break end
+                                end
+                            end
+                        end
+                        if hit then
+                            bestAng = ang
+                            best = { id = id, ped = ped, hb = hitHb, ang = ang, pred = pred }
+                        end
+                    end
+                end
+            end
+        end
+    end
+    return best
+end
+-- цель для подмены пули: выстрел ушёл в течение 0.4 с после нажатия триггером
+function RG.tbShotTarget()
+    local tb = RG.tb
+    if not O.tb_on or not tb.id or os.clock() - tb.fireT > 0.4 then return nil end
+    local silent = RG.on() and O.rage_main_silent_aim
+    if not silent and not O.tb_redirect then return nil end
+    local ok, ped = sampGetCharHandleBySampPlayerId(tb.id)
+    if not ok or not doesCharExist(ped) or isCharDead(ped) or not sampIsPlayerConnected(tb.id) then return nil end
+    local tx, ty, tz, px, py, pz, bp = RG.hbPoint(ped, tb.hb or 2, 0)
+    local hp = sampGetPlayerHealth(tb.id) + sampGetPlayerArmor(tb.id)
+    return { id = tb.id, ped = ped, x = tx, y = ty, z = tz, px = px, py = py, pz = pz, bp = bp, hp = hp, ang = 0 }
+end
+function RG.tbTick(free)
+    local tb = RG.tb
+    if not O.tb_on or not free or not spawnedAt or os.clock() - spawnedAt < 5 then tb.seenT = nil; return end
+    if not isCharOnFoot(PLAYER_PED) then tb.seenT = nil; return end
+    local w = getCurrentCharWeapon(PLAYER_PED)
+    if not RG.DMG[w] then tb.seenT = nil; return end
+    local act = O.tb_act or 0
+    if act == 1 and not isKeyDown(0x02) then tb.seenT = nil; return end
+    if act == 2 then
+        local kc = VIS.KEYS_C[(O.tb_key or 0) + 1]
+        if not kc or not isKeyDown(kc) then tb.seenT = nil; return end
+    end
+    local t = RG.tbFind(w)
+    local now = os.clock()
+    if not t then tb.seenT = nil; return end
+    if not tb.seenT or tb.id ~= t.id then tb.seenT = now end
+    tb.id, tb.hb, tb.pred = t.id, t.hb, t.pred
+    if (now - tb.seenT) * 1000 < (O.tb_delay or 0) then return end
+    if O.tb_qstop then setGameKeyState(0, 0); setGameKeyState(1, 0) end
+    if O.tb_aim then setGameKeyState(6, 255) end
+    setGameKeyState(17, 255)
+    tb.fireT = now
+    TR.T('tb.fire ' .. t.id .. (t.pred and ' pred' or ''))
+end
+
+-- ---------- QUICK PEEK ASSIST ----------
+RG.qp = { active = false, back = false, shotT = 0, draw = nil }
+function RG.qpTick(free)
+    local q = RG.qp
+    q.draw = nil
+    if not O.qp_on or not spawnedAt or not doesCharExist(PLAYER_PED) then q.active, q.back = false, false; return end
+    local kc = VIS.KEYS_C[(O.qp_key or 0) + 1]
+    local held = free and kc and isKeyDown(kc)
+    local now = os.clock()
+    if held and not q.active and isCharOnFoot(PLAYER_PED) then
+        local x, y, z = getCharCoordinates(PLAYER_PED)
+        q.active, q.back, q.x, q.y, q.z, q.startT, q.lastShot = true, false, x, y, z, now, q.shotT
+    end
+    if not q.active then return end
+    if not isCharOnFoot(PLAYER_PED) then q.active, q.back = false, false; return end
+    local ret = O.qp_ret or 2
+    if not q.back then
+        if q.shotT > q.lastShot and ret ~= 1 then q.back, q.backT = true, now
+        elseif not held and ret ~= 0 then q.back, q.backT = true, now
+        elseif not held then q.active = false; return end
+    end
+    if q.back then
+        local x, y, z = getCharCoordinates(PLAYER_PED)
+        local dx, dy = q.x - x, q.y - y
+        local d = math.sqrt(dx * dx + dy * dy)
+        local done = d < 0.3 or now - q.backT > 2.5
+        if not done and (O.qp_method or 0) == 1 then
+            local p = pedPos()
+            if p then p[0], p[1], p[2] = q.x, q.y, q.z end
+            setCharVelocity(PLAYER_PED, 0, 0, 0)
+            done = true
+        elseif not done then
+            local _, _, vz = getCharVelocity(PLAYER_PED)
+            local spd = math.min(O.qp_speed or 12, d * 14)
+            setGameKeyState(0, 0); setGameKeyState(1, 0)
+            setCharVelocity(PLAYER_PED, dx / d * spd, dy / d * spd, vz)
+        end
+        if done then
+            local _, _, vz = getCharVelocity(PLAYER_PED)
+            setCharVelocity(PLAYER_PED, 0, 0, vz)
+            if held then q.back, q.lastShot = false, q.shotT    -- ещё держим — готов к следующему пику с той же точки
+            else q.active, q.back = false, false; return end
+        end
+    end
+    -- кольцо на точке возврата (считаем тут, рисуем в OnFrame)
+    if O.qp_show then
+        local pts = {}
+        for i = 0, 23 do
+            local a = i / 24 * math.pi * 2
+            local sx, sy = VIS.proj(q.x + math.cos(a) * 0.45, q.y + math.sin(a) * 0.45, q.z - 0.95)
+            pts[#pts + 1] = sx and { sx, sy } or false
+        end
+        q.draw = pts
+    end
+end
+function RG.qpDraw(dl)
+    local pts = RG.qp.draw
+    if not pts then return end
+    local c = VIS.rgb('qp_show')
+    for i = 1, #pts do
+        local a, b = pts[i], pts[i % #pts + 1]
+        if a and b then
+            dl:AddLine(V(a[1], a[2]), V(b[1], b[2]), VIS.C(c, 60), 5)
+            dl:AddLine(V(a[1], a[2]), V(b[1], b[2]), VIS.C(c, 230), 1.8)
+        end
+    end
+end
+
+-- каждый кадр: Trigger Bot / Quick Peek / Quick Scope / Quick Stop
 function RG.tick(free)
+    pcall(RG.qpTick, free)
+    local okt, et = pcall(RG.tbTick, free)
+    if not okt then TR.T('tb.err ' .. tostring(et)) end
     if not RG.on() or not free or not spawnedAt or os.clock() - spawnedAt < 5 then return end
     if not isCharOnFoot(PLAYER_PED) then return end
     local w = getCurrentCharWeapon(PLAYER_PED)
     if not RG.DMG[w] then return end
     local aiming = isKeyDown(0x02)
     local scope = O.rage_sel_quick_scope and (w == 33 or w == 34) and aiming
-    if not ((O.rage_main_automatic_fire and aiming) or scope) then return end
+    if not scope then return end
     local now = os.clock()
     if now - RG.lastScan > 0.03 then          -- поиск цели не чаще ~30 раз в секунду
         RG.lastScan = now
@@ -4132,7 +4372,7 @@ function VIS.drawHud(dl, sw, sh, now)
         local act = {}
         local function add(on, n) if on then act[#act + 1] = n end end
         add(RG.on(), 'Rage Aimbot'); add(RG.on() and O.rage_main_silent_aim, 'Silent Aim')
-        add(RG.on() and O.rage_main_automatic_fire, 'Auto Fire'); add(RG.on() and O.rage_other_double_tap, 'Double Tap'); add(O.mb_on, 'Magic Bullet')
+        add(O.tb_on, 'Trigger Bot'); add(O.qp_on and RG.qp.active, 'Quick Peek'); add(RG.on() and O.rage_other_double_tap, 'Double Tap'); add(O.mb_on, 'Magic Bullet')
         add(O.aa_enable, 'Anti-Aim'); add(O.m_move_bunny_hop, 'Bunny Hop'); add(O.m_move_air_strafe, 'Air Strafe')
         add(O.m_move_slow_walk, 'Slow Walk'); add(O.v_nv, 'Night Vision'); add(O.v_ir, 'Thermal')
         if #act > 0 then
@@ -4157,7 +4397,7 @@ imgui.OnFrame(function() return VIS.active end, function(self)
     local saveA = gA
     gA = 1
     pcall(VIS.drawScreenFx, dl, sw, sh, now)
-    if VIS.ready then pcall(VIS.drawHat, dl) end
+    if VIS.ready then pcall(VIS.drawHat, dl); pcall(RG.qpDraw, dl) end
     if VIS.ready then
         local style, wd = O.trc_style or 1, O.trc_w or 1.6
         for _, t in ipairs(VIS.drawTr) do
