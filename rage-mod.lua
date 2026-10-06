@@ -20,7 +20,7 @@
 
 script_name('rage-mod')
 script_author('rage-mod')
-script_version('4.6.3')
+script_version('4.7.0')
 
 local imgui    = require 'mimgui'
 local encoding = require 'encoding'
@@ -211,6 +211,8 @@ local RU = {
     ['Mouse'] = 'По мышке', ['Hop Speed'] = 'Скорость прыжков', ['Steer In Air'] = 'Рулить мышкой в воздухе',
     -- ряды
     ['Enabled'] = 'Включено', ['Silent Aim'] = 'Тихий аим', ['Automatic Fire'] = 'Автострельба',
+    ['Magic Bullet'] = 'Магическая пуля', ['MAGIC BULLET'] = 'МАГИЧЕСКАЯ ПУЛЯ', ['Max Distance'] = 'Макс. дистанция',
+    ['Skip Teammates'] = 'Не трогать тиммейтов',
     ['Aim Through Walls'] = 'Сквозь стены', ['Refine Shot'] = 'Уточнение выстрела', ['Field of View'] = 'Поле зрения',
     ['History'] = 'История', ['Delay Shot'] = 'Задержка выстрела', ['Remove Spread'] = 'Убрать разброс',
     ['Duck Peek Assist'] = 'Пик из приседа', ['Quick Peek Assist'] = 'Быстрый пик', ['Double Tap'] = 'Двойной выстрел',
@@ -999,6 +1001,14 @@ VIS.SUB_BT = { title = 'BACKTRACK', rows = CARD('bt', {
     T_('Show Trail', true, 'bt_trail'),
 }) }
 
+-- Magic Bullet: промах по игроку -> попадание в ближайшего к прицелу, даже за стеной, в случайную кость
+VIS.SUB_MB = { title = 'MAGIC BULLET', rows = CARD('mb', {
+    T_('Enabled', false, 'mb_on'),
+    SL('Field of View', 1, 180, 25, '%.1f°', true, 'mb_fov'),
+    SL('Max Distance', 10, 300, 150, '%d m', false, 'mb_dist'),
+    SL('Hit Chance', 0, 100, 100, '%d%%', false, 'mb_hc'),
+    T_('Skip Teammates', true, 'mb_team'),
+}) }
 local ROWS = {
     rage_main = CARD('rage_main', {
         T_('Enabled'), T_('Silent Aim', true), T_('Automatic Fire', true), T_('Aim Through Walls', true),
@@ -1009,7 +1019,7 @@ local ROWS = {
         CH('Backtrack', VIS.SUB_BT),
         SEL('Delay Shot', { 'Off', 'Damage', 'Accuracy' }, 1),
         SEL('Remove Spread', { 'Off', 'Partial', 'Full' }, 2),
-        DIS('Duck Peek Assist'), DIS('Quick Peek Assist'), T_('Double Tap'),
+        CH('Magic Bullet', VIS.SUB_MB), DIS('Quick Peek Assist'), T_('Double Tap'),
     }),
     rage_sel = CARD('rage_sel', {
         SEL('Prefer', { 'Damage', 'Accuracy', 'Head', 'Body' }, 0),
@@ -2324,9 +2334,90 @@ function RG.find(weapon, strict)
     return best
 end
 
+-- ---------- MAGIC BULLET ----------
+-- кости для случайного попадания: смещение от центра педа (вверх / вбок) и bodypart SA-MP
+RG.MB_BONES = {
+    { dz = 0.68, side = 0.00, bp = 9 },   -- голова
+    { dz = 0.35, side = 0.00, bp = 3 },   -- торс
+    { dz = -0.05, side = 0.00, bp = 4 },  -- пах
+    { dz = 0.30, side = -0.28, bp = 5 },  -- левая рука
+    { dz = 0.30, side = 0.28, bp = 6 },   -- правая рука
+    { dz = -0.45, side = -0.12, bp = 7 }, -- левая нога
+    { dz = -0.45, side = 0.12, bp = 8 },  -- правая нога
+}
+-- цель — игрок, ближайший к прицелу (по углу), БЕЗ проверки стен
+function RG.mbFind()
+    local cx, cy, cz, fx, fy, fz = RG.cam()
+    local fov, maxd = O.mb_fov or 25, O.mb_dist or 150
+    local myId = RG.myId()
+    local okc, myCol = pcall(sampGetPlayerColor, myId)
+    local best, bestAng = nil, math.huge
+    for id = 0, sampGetMaxPlayerId(false) do
+        if id ~= myId and sampIsPlayerConnected(id) then
+            local ok, ped = sampGetCharHandleBySampPlayerId(id)
+            if ok and doesCharExist(ped) and not isCharDead(ped) and not sampIsPlayerPaused(id)
+                and sampGetPlayerHealth(id) > 0 then
+                local team = false
+                if O.mb_team and okc then
+                    local okp, pc = pcall(sampGetPlayerColor, id)
+                    team = okp and pc == myCol
+                end
+                if not team then
+                    local x, y, z = getCharCoordinates(ped)
+                    local dx, dy, dz = x - cx, y - cy, z + 0.2 - cz
+                    local dist = math.sqrt(dx * dx + dy * dy + dz * dz)
+                    if dist > 0.5 and dist <= maxd then
+                        local dot = (dx * fx + dy * fy + dz * fz) / dist
+                        local ang = math.deg(math.acos(math.max(-1, math.min(1, dot))))
+                        if ang <= fov and ang < bestAng then
+                            bestAng = ang
+                            best = { id = id, ped = ped, px = x, py = y, pz = z }
+                        end
+                    end
+                end
+            end
+        end
+    end
+    return best
+end
+-- true — пуля подменена
+function RG.magic(data)
+    if not O.mb_on or not spawnedAt then return false end
+    if data.targetType == 1 then return false end         -- и так попали в игрока
+    local w = getCurrentCharWeapon(PLAYER_PED)
+    local dmg = RG.DMG[w]
+    if not dmg then return false end
+    local hc = O.mb_hc or 100
+    if hc < 100 and math.random(100) > hc then return false end
+    local t = RG.mbFind()
+    if not t then return false end
+    local b = RG.MB_BONES[math.random(#RG.MB_BONES)]
+    local h = math.rad(getCharHeading(t.ped))
+    local rx, ry = math.cos(h), math.sin(h)
+    local tx, ty, tz = t.px + rx * b.side, t.py + ry * b.side, t.pz + b.dz
+    data.targetType = 1
+    data.targetId = t.id
+    data.target.x, data.target.y, data.target.z = tx, ty, tz
+    data.center.x, data.center.y, data.center.z = tx - t.px, ty - t.py, tz - t.pz
+    local id, bp = t.id, b.bp
+    if bit.band(O.m_feat_log_events or 0, 1) ~= 0 then
+        local okn, nm = pcall(sampGetPlayerNickname, id)
+        chat(('magic {3DE07A}%.1f{FFFFFF} -> %s[%d] bp%d'):format(dmg, okn and nm or '?', id, bp))
+    end
+    lua_thread.create(function()
+        if not sampIsPlayerConnected(id) then return end
+        TR.T('rg.magic ' .. id .. ' w' .. w)
+        sampSendGiveDamage(id, dmg, w, bp)
+        pcall(VIS.hit, id, dmg)
+        if O.m_feat_hit_sound then addOneOffSound(0.0, 0.0, 0.0, 17802) end
+    end)
+    return true
+end
+
 -- выстрел ушёл: подменяем пулю на попадание по цели и отправляем урон
 function RG.onBullet(data)
-    if not RG.on() or not O.rage_main_silent_aim or not spawnedAt then return end
+    -- сайлент выключен — работает только Magic Bullet (если включён)
+    if not RG.on() or not O.rage_main_silent_aim or not spawnedAt then RG.magic(data); return end
     local w = getCurrentCharWeapon(PLAYER_PED)
     local dmg = RG.DMG[w]
     if not dmg then return end
@@ -2334,6 +2425,8 @@ function RG.onBullet(data)
     if hc > 0 and math.random(100) > hc then return end
     local t = RG.find(w, false)
     if not t then
+        -- сайлент цель не нашёл (например, все за стеной) — пробуем Magic Bullet
+        if RG.magic(data) then return end
         -- Remove Spread: без цели — пуля летит точно в прицел
         local rs = O.rage_other_remove_spread or 0
         if rs > 0 and data.targetType == 0 then
@@ -3998,7 +4091,7 @@ function VIS.drawHud(dl, sw, sh, now)
         local act = {}
         local function add(on, n) if on then act[#act + 1] = n end end
         add(RG.on(), 'Rage Aimbot'); add(RG.on() and O.rage_main_silent_aim, 'Silent Aim')
-        add(RG.on() and O.rage_main_automatic_fire, 'Auto Fire'); add(RG.on() and O.rage_other_double_tap, 'Double Tap')
+        add(RG.on() and O.rage_main_automatic_fire, 'Auto Fire'); add(RG.on() and O.rage_other_double_tap, 'Double Tap'); add(O.mb_on, 'Magic Bullet')
         add(O.aa_enable, 'Anti-Aim'); add(O.m_move_bunny_hop, 'Bunny Hop'); add(O.m_move_air_strafe, 'Air Strafe')
         add(O.m_move_slow_walk, 'Slow Walk'); add(O.v_nv, 'Night Vision'); add(O.v_ir, 'Thermal')
         if #act > 0 then
