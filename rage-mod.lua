@@ -20,7 +20,7 @@
 
 script_name('rage-mod')
 script_author('rage-mod')
-script_version('4.8.14')
+script_version('4.8.15')
 
 local imgui    = require 'mimgui'
 local encoding = require 'encoding'
@@ -2604,6 +2604,8 @@ function RG.onBullet(data)
     if silent and not tt and hc > 0 and math.random(100) > hc then return end
     -- триггер (в т.ч. «наперёд» — цель ещё за углом) приоритетнее: он уже решил, в кого стрелять
     local t = tt or RG.find(w, false, RG.originOf(data))
+    RG.lastSilent = ('сайлент=%s цель=%s триггер/прыжок=%s'):format(tostring(silent), t and t.id or 'нет', tt and tt.id or '-')
+    RG.lastSilentT = os.clock()
     TR.E(('silent on=%s tt=%s t=%s mb=%s'):format(tostring(silent), tt and tt.id or '-', t and t.id or '-', tostring(O.mb_on)))
     if not t then
         -- сайлент цель не нашёл (например, все за стеной) — пробуем Magic Bullet
@@ -3096,6 +3098,45 @@ function RG.jaRun(fn)
             end
         end)
     end
+end
+
+-- /ragemd_silent — диагностика сайлента прямо в чат
+function RG.diag()
+    local w = getCurrentCharWeapon(PLAYER_PED)
+    chat(('silent: v%s | Рейдж=%s Тихий аим=%s | оружие %d (урон %s) | FOV %.0f | сквозь стены=%s | хитбоксы 0x%X | MB=%s'):format(
+        thisScript().version, tostring(RG.on()), tostring(O.rage_main_silent_aim), w, tostring(RG.DMG[w]),
+        O.rage_main_field_of_view or 180, tostring(O.rage_main_aim_through_walls), O.rage_sel_hitboxes or 7, tostring(O.mb_on)))
+    local cx, cy, cz, fx, fy, fz = RG.cam()
+    local orgs = RG.origins()
+    local myId = RG.myId()
+    local n, nf, nv = 0, 0, 0
+    for id = 0, sampGetMaxPlayerId(false) do
+        if id ~= myId and sampIsPlayerConnected(id) then
+            local ok, ped = sampGetCharHandleBySampPlayerId(id)
+            if ok and doesCharExist(ped) and not isCharDead(ped) then
+                n = n + 1
+                local x, y, z = getCharCoordinates(ped)
+                local dx, dy, dz = x - cx, y - cy, z + 0.35 - cz
+                local dist = math.sqrt(dx * dx + dy * dy + dz * dz)
+                local ang = math.deg(math.acos(math.max(-1, math.min(1, (dx * fx + dy * fy + dz * fz) / dist))))
+                if ang <= (O.rage_main_field_of_view or 180) then nf = nf + 1 end
+                local vis = RG.visAny(orgs, x, y, z + 0.35)
+                if vis then nv = nv + 1 end
+                if n <= 4 then
+                    chat(('  id %d: %.0fм угол %.0f° видим=%s пауза=%s hp=%d'):format(id, dist, ang, tostring(vis),
+                        tostring(sampIsPlayerPaused(id)), sampGetPlayerHealth(id)))
+                end
+            end
+        end
+    end
+    chat(('  игроков рядом %d, в FOV %d, видимых %d, точек обзора %d'):format(n, nf, nv, #orgs))
+    if RG.lastSilentT then
+        chat(('  последний выстрел (%.1f с назад): %s'):format(os.clock() - RG.lastSilentT, RG.lastSilent))
+    else
+        chat('  выстрелов через сайлент ещё не было (хук пули не срабатывал)')
+    end
+    local t = RG.find(w, false)
+    chat('  сейчас RG.find -> ' .. (t and ('id ' .. t.id) or 'нет цели'))
 end
 
 -- ---------- AUTO +C ----------
@@ -5108,6 +5149,7 @@ function main()
     loadConfig()
     sampRegisterChatCommand('ragemd', toggleMenu)
     sampRegisterChatCommand('ragemd_chams', function() pcall(VIS.diag) end)
+    sampRegisterChatCommand('ragemd_silent', function() local ok, e = pcall(RG.diag); if not ok then chat('diag err: ' .. tostring(e)) end end)
     sampRegisterChatCommand('ragemd_update', function()
         checkUpdate(true, function(v)
             if v then chat('скачана {3DE07A}v' .. v .. '{FFFFFF} — включится после перезапуска игры (или Ctrl+R)') end
