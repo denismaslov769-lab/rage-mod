@@ -20,7 +20,7 @@
 
 script_name('rage-mod')
 script_author('rage-mod')
-script_version('3.6.1')
+script_version('3.7.0')
 
 local imgui    = require 'mimgui'
 local encoding = require 'encoding'
@@ -453,7 +453,7 @@ local SUB_YAW = { title = 'YAW', rows = CARD('aa', {
     SL('Spin Speed', 1, 60, 25, '%d', false, 'aa_speed'),
     SL('Jitter Range', 0, 180, 90, '%d°', false, 'aa_jitter'),
     T_('Show Locally', true, 'aa_local'),
-    T_('Force Sync', true, 'aa_force'),
+    T_('Force Sync', false, 'aa_force'),
     T_('Disable While Aiming', true, 'aa_noaim'),
     SEL('Toggle Key', keyNames, 0, 'aa_key'),
 }) }
@@ -524,13 +524,13 @@ local ROWS = {
         CH('Windows'), CH('Removals'), CH('Ambience'), CH('Hit Marker'), CH('Bullet Tracers'), COL('Bullet Impacts', true),
     }),
     m_move = CARD('m_move', {
-        T_('Bunny Hop', true), T_('Air Strafe', true), T_('Jump Bug', true), T_('Standalone Quick Stop', true),
-        T_('Strafe Assist', true), T_('Edge Jump'), T_('Slow Walk'), T_('Fast Ladder', true),
+        T_('Bunny Hop'), T_('Air Strafe'), T_('Jump Bug'), T_('Standalone Quick Stop'),
+        T_('Strafe Assist'), T_('Edge Jump'), T_('Slow Walk'), T_('Fast Ladder'),
     }),
     m_feat = CARD('m_feat', {
-        T_('Quick Switch', true), DIS('Super Toss'), DIS('Knife Bot'), T_('Prevent AFK Kick', true), T_('Hit Sound', true),
+        T_('Quick Switch'), DIS('Super Toss'), DIS('Knife Bot'), T_('Prevent AFK Kick'), T_('Hit Sound'),
         DIS('Automatic Purchase'), DIS('Automatic Grenade Release'), DIS('Auto-Accept Matchmaking'),
-        MUL('Log Events', { 'Damage Dealt', 'Damage Taken', 'Purchases', 'Deaths' }, 0x03),
+        MUL('Log Events', { 'Damage Dealt', 'Damage Taken', 'Purchases', 'Deaths' }, 0x00),
     }),
 }
 
@@ -545,11 +545,22 @@ local function saveConfig()
     for k in pairs(DEF) do t.options[k] = O[k] end
     inicfg.save(t, CFG_FILE)
 end
+DEF.cfg_rev = 2
+O.cfg_rev = 2
 local function loadConfig()
     local t = inicfg.load(nil, CFG_FILE)
     if not t or not t.options then return false end
     for k, v in pairs(t.options) do
         if DEF[k] ~= nil and type(v) == type(DEF[k]) then O[k] = v end
+    end
+    -- v3.7: после бана на сервере — один раз выключаем всё, что меняет движение/память/синк
+    if (tonumber(t.options.cfg_rev) or 0) < 2 then
+        for k in pairs(DEF) do
+            if k:find('^m_move_') or k:find('^m_feat_') or k == 'aa_enable' or k == 'aa_force' then O[k] = DEF[k] end
+        end
+        O.aa_force = false
+        O.cfg_rev = 2
+        saveConfig()
     end
     return true
 end
@@ -1302,8 +1313,18 @@ end)
 -- ============================================================ ANTI-AIM (крутилка)
 local aaFlip, aaSign = false, 1
 
+-- ничего не делаем, пока игрок не заспавнен и не прошло 5 секунд после спавна
+-- (подмена синка / движения / памяти во время коннекта и спавна палится античитом)
+local spawnedAt = nil
+local function gameReady()
+    local ok, sp = pcall(sampIsLocalPlayerSpawned)
+    if not ok or not sp or not doesCharExist(PLAYER_PED) then spawnedAt = nil; return false end
+    spawnedAt = spawnedAt or os.clock()
+    return os.clock() - spawnedAt > 5
+end
+
 local function aaActive()
-    if not O.aa_enable then return false end
+    if not O.aa_enable or not spawnedAt or os.clock() - spawnedAt <= 5 then return false end
     if not doesCharExist(PLAYER_PED) or not isCharOnFoot(PLAYER_PED) then return false end
     if O.aa_noaim and isKeyDown(0x02) then return false end
     return true
@@ -1603,7 +1624,7 @@ local QS_WEAPONS = { [24] = true, [25] = true, [27] = false, [33] = true, [34] =
 local qsPending, qsBusy = false, false
 
 function sampev.onSendBulletSync()
-    if O.m_feat_quick_switch then qsPending = true end
+    if O.m_feat_quick_switch and spawnedAt then qsPending = true end
 end
 
 local function qsTick()
@@ -1752,12 +1773,13 @@ function main()
             O.aa_enable = not O.aa_enable
             if O.notify then chat('Anti-Aim: ' .. (O.aa_enable and '{3DE07A}ON' or '{E03D3D}OFF')) end
         end
-        local I = doesCharExist(PLAYER_PED) and mvInput(free) or nil
+        local ready = gameReady()
+        local I = ready and mvInput(free) or nil
         aaTick(free, I)
         mvTick(free, I)
-        qsTick()
+        if ready then qsTick() end
         logTick()
-        setAntiAfk(O.m_feat_prevent_afk_kick)
+        setAntiAfk(ready and O.m_feat_prevent_afk_kick)
         if os.clock() - lastIconCheck > 1.5 then
             lastIconCheck = os.clock()
             refreshWeaponIcons(false)
