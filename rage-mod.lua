@@ -20,7 +20,7 @@
 
 script_name('rage-mod')
 script_author('rage-mod')
-script_version('3.9.0')
+script_version('4.0.0')
 
 local imgui    = require 'mimgui'
 local encoding = require 'encoding'
@@ -476,15 +476,15 @@ local SUB_BHOP = { title = 'BUNNY HOP', rows = CARD('bhop', {
 
 local ROWS = {
     rage_main = CARD('rage_main', {
-        T_('Enabled', true), T_('Silent Aim', true), T_('Automatic Fire', true), T_('Aim Through Walls', true),
+        T_('Enabled'), T_('Silent Aim', true), T_('Automatic Fire', true), T_('Aim Through Walls', true),
         SEL('Refine Shot', { 'Off', 'Latency', 'Performance' }, 1),
         SL('Field of View', 0, 180, 180, '%.1f°', true),
     }),
     rage_other = CARD('rage_other', {
-        SEL('History', { 'Off', 'Default', 'Maximum' }, 2),
+        DIS('History'),
         SEL('Delay Shot', { 'Off', 'Damage', 'Accuracy' }, 1),
         SEL('Remove Spread', { 'Off', 'Partial', 'Full' }, 2),
-        T_('Duck Peek Assist'), T_('Quick Peek Assist'), T_('Double Tap'),
+        DIS('Duck Peek Assist'), DIS('Quick Peek Assist'), T_('Double Tap'),
     }),
     rage_sel = CARD('rage_sel', {
         SEL('Prefer', { 'Damage', 'Accuracy', 'Head', 'Body' }, 0),
@@ -1187,7 +1187,7 @@ local function PopupLayer(reveal)
         if accepts and clicked and popup.set(i) then popup.open = false end
     end
     vtxScale(raw, first, px + w * 0.5, py + h * 0.5, 0.96 + 0.04 * e, 4 * (1 - e), 0)
-    if popup.open and imgui.GetFrameCount() > popup.frame and imgui.IsMouseClicked(0) and not imgui.IsWindowHovered() then
+    if popup.open and imgui.GetFrameCount() > popup.frame and imgui.IsMouseClicked(0) and not imgui.IsWindowHovered(imgui.HoveredFlags.AllowWhenBlockedByActiveItem) then
         popup.open = false
     end
     imgui.End()
@@ -1217,7 +1217,7 @@ local function SubPopover(reveal)
     end
     vtxScale(raw, first, px, py + h * 0.5, 0.96 + 0.04 * e, -6 * (1 - e), 0)
     if sub.open and imgui.GetFrameCount() > sub.frame and imgui.IsMouseClicked(0)
-        and not imgui.IsWindowHovered() and not popupHovered()
+        and not imgui.IsWindowHovered(imgui.HoveredFlags.AllowWhenBlockedByActiveItem) and not popupHovered()
         and not inRect(Mouse(), sub.ax, sub.ay, sub.aw, sub.ah) then
         sub.open, popup.open = false, false
     end
@@ -1266,7 +1266,7 @@ local function AccountPopover(bx, by, reveal)
     TextY(dl, px + 18, py + 66 + 3 * 28, 28, C(185, 188, 198), L('Synchronization'), F.ctrl)
     Toggle(dl, '##acc_sync', px + 169, py + 150, 'acc_sync')
     if account.open and imgui.GetFrameCount() > account.frame and imgui.IsMouseClicked(0)
-        and not imgui.IsWindowHovered() and not popupHovered()
+        and not imgui.IsWindowHovered(imgui.HoveredFlags.AllowWhenBlockedByActiveItem) and not popupHovered()
         and not inRect(Mouse(), bx + 7, by + 531, 140, 38) then
         account.open, popup.open = false, false
     end
@@ -1662,6 +1662,179 @@ local function mvTick(free, I)
     mv.wasAir, mv.prevMoving, mv.jumpHeld = inAir, I.moving, I.jump
 end
 
+-- ============================================================ RAGE (сайлент аим / автострельба)
+-- Всё в одной таблице RG — в главном чанке Lua лимит 200 локальных переменных.
+local RG = {
+    -- урон за выстрел (стандарт SA-MP; дробовики — сумма дробинок)
+    DMG = { [22] = 8.25, [23] = 13.2, [24] = 46.2, [25] = 49.5, [26] = 49.5, [27] = 39.6, [28] = 6.6,
+            [29] = 8.25, [30] = 9.9, [31] = 9.9, [32] = 6.6, [33] = 24.75, [34] = 41.25, [38] = 46.2 },
+    -- хитбоксы (порядок как в меню Hitboxes): смещение по высоте от центра педа, сбоку, bodypart для урона
+    HB = {
+        { dz = 0.68, side = 0.00, bp = 9 },   -- Head
+        { dz = 0.35, side = 0.00, bp = 3 },   -- Chest
+        { dz = 0.05, side = 0.00, bp = 4 },   -- Stomach
+        { dz = 0.30, side = 0.28, bp = 6 },   -- Arms
+        { dz = -0.45, side = 0.12, bp = 8 },  -- Legs
+        { dz = -0.88, side = 0.12, bp = 8 },  -- Feet
+    },
+    lastT = nil, lastScan = 0,
+}
+
+function RG.on() return O.rage_main_enabled end
+
+function RG.cam()
+    local cx, cy, cz = getActiveCameraCoordinates()
+    local px, py, pz = getActiveCameraPointAt()
+    local dx, dy, dz = px - cx, py - cy, pz - cz
+    local n = math.sqrt(dx * dx + dy * dy + dz * dz)
+    if n < 1e-4 then n = 1 end
+    return cx, cy, cz, dx / n, dy / n, dz / n
+end
+
+function RG.myId()
+    local ok, id = sampGetPlayerIdByCharHandle(PLAYER_PED)
+    return ok and id or -1
+end
+
+-- порядок проверки хитбоксов по «Prefer»
+function RG.order()
+    local p = O.rage_sel_prefer or 0
+    if p == 3 then return { 2, 3, 1, 4, 5, 6 } end       -- Body
+    return { 1, 2, 3, 4, 5, 6 }                          -- Damage / Accuracy / Head
+end
+
+-- нужен ли такой урон по Min Damage (0 = Auto, >100 = HP+X → только если убиваем)
+function RG.dmgOk(dmg, hp)
+    local v = O.rage_sel_min_damage or 0
+    if v == 0 then return true end
+    local req = v > 100 and (hp + (v - 100)) or v
+    return dmg >= math.min(req, hp)
+end
+
+-- поиск цели: { id, ped, x, y, z, bp, hp, ang }
+function RG.find(weapon)
+    local dmg = RG.DMG[weapon]
+    if not dmg then return nil end
+    local cx, cy, cz, fx, fy, fz = RG.cam()
+    local fov = O.rage_main_field_of_view or 180
+    local walls = O.rage_main_aim_through_walls
+    local prefer = O.rage_sel_prefer or 0
+    local mask = O.rage_sel_hitboxes or 0x07
+    local myId = RG.myId()
+    local lead = 0
+    if (O.rage_main_refine_shot or 0) == 1 and myId >= 0 then   -- Latency: упреждение на пинг
+        local okp, ping = pcall(sampGetPlayerPing, myId)
+        lead = (okp and ping or 0) / 1000
+    end
+    local best, bestScore = nil, math.huge
+    for id = 0, sampGetMaxPlayerId(false) do
+        if id ~= myId and sampIsPlayerConnected(id) then
+            local ok, ped = sampGetCharHandleBySampPlayerId(id)
+            if ok and doesCharExist(ped) and not isCharDead(ped) and not sampIsPlayerPaused(id) then
+                local hp = sampGetPlayerHealth(id) + sampGetPlayerArmor(id)
+                if hp > 0 and RG.dmgOk(dmg, hp) then
+                    local x, y, z = getCharCoordinates(ped)
+                    if lead > 0 then
+                        local vx, vy, vz = getCharVelocity(ped)
+                        x, y, z = x + vx * lead, y + vy * lead, z + vz * lead
+                    end
+                    local h = math.rad(getCharHeading(ped))
+                    local rx, ry = math.cos(h), math.sin(h)   -- вправо от педа
+                    for _, i in ipairs(RG.order()) do
+                        if bit.band(mask, bit.lshift(1, i - 1)) ~= 0 then
+                            local hb = RG.HB[i]
+                            local tx, ty, tz = x + rx * hb.side, y + ry * hb.side, z + hb.dz
+                            local dx, dy, dz = tx - cx, ty - cy, tz - cz
+                            local dist = math.sqrt(dx * dx + dy * dy + dz * dz)
+                            if dist > 0.5 and dist < 300 then
+                                local dot = (dx * fx + dy * fy + dz * fz) / dist
+                                local ang = math.deg(math.acos(math.max(-1, math.min(1, dot))))
+                                if ang <= fov and (walls or isLineOfSightClear(cx, cy, cz, tx, ty, tz, true, true, false, true, false)) then
+                                    local score = (prefer == 0) and (hp * 1000 + ang) or ang
+                                    if score < bestScore then
+                                        bestScore = score
+                                        best = { id = id, ped = ped, x = tx, y = ty, z = tz, px = x, py = y, pz = z, bp = hb.bp, hp = hp, ang = ang }
+                                    end
+                                    break   -- первый подходящий хитбокс этой цели (по приоритету)
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+    return best
+end
+
+-- выстрел ушёл: подменяем пулю на попадание по цели и отправляем урон
+function RG.onBullet(data)
+    if not RG.on() or not O.rage_main_silent_aim or not spawnedAt then return end
+    local w = getCurrentCharWeapon(PLAYER_PED)
+    local dmg = RG.DMG[w]
+    if not dmg then return end
+    local hc = O.rage_sel_hit_chance or 0
+    if hc > 0 and math.random(100) > hc then return end
+    local t = RG.find(w)
+    if not t then
+        -- Remove Spread: без цели — пуля летит точно в прицел
+        local rs = O.rage_other_remove_spread or 0
+        if rs > 0 and data.targetType == 0 then
+            local cx, cy, cz, fx, fy, fz = RG.cam()
+            local ok, cp = processLineOfSight(cx, cy, cz, cx + fx * 300, cy + fy * 300, cz + fz * 300, true, true, false, true, false, false, false, false)
+            if ok and cp and cp.pos then
+                local k = rs == 2 and 1 or 0.5
+                data.target.x = data.target.x + (cp.pos[1] - data.target.x) * k
+                data.target.y = data.target.y + (cp.pos[2] - data.target.y) * k
+                data.target.z = data.target.z + (cp.pos[3] - data.target.z) * k
+            end
+        end
+        return
+    end
+    local alreadyHit = data.targetType == 1 and data.targetId == t.id
+    data.targetType = 1
+    data.targetId = t.id
+    data.target.x, data.target.y, data.target.z = t.x, t.y, t.z
+    data.center.x, data.center.y, data.center.z = t.x - t.px, t.y - t.py, t.z - t.pz
+    if alreadyHit then return end     -- игра сама засчитала попадание — урон не дублируем
+    local id, bp = t.id, t.bp
+    lua_thread.create(function()
+        sampSendGiveDamage(id, dmg, w, bp)
+        if O.m_feat_hit_sound then addOneOffSound(0.0, 0.0, 0.0, 17802) end
+        if O.rage_other_double_tap then
+            wait(60)
+            sampSendGiveDamage(id, dmg, w, bp)
+        end
+    end)
+end
+
+-- каждый кадр: Automatic Fire / Quick Scope / Quick Stop
+function RG.tick(free)
+    if not RG.on() or not free or not spawnedAt or os.clock() - spawnedAt < 5 then return end
+    if not isCharOnFoot(PLAYER_PED) then return end
+    local w = getCurrentCharWeapon(PLAYER_PED)
+    if not RG.DMG[w] then return end
+    local aiming = isKeyDown(0x02)
+    local scope = O.rage_sel_quick_scope and (w == 33 or w == 34) and aiming
+    if not ((O.rage_main_automatic_fire and aiming) or scope) then return end
+    local now = os.clock()
+    if now - RG.lastScan > 0.03 then          -- поиск цели не чаще ~30 раз в секунду
+        RG.lastScan = now
+        RG.lastT = RG.find(w)
+    end
+    if not RG.lastT then return end
+    -- Delay Shot: Accuracy — стреляем только когда почти стоим
+    if (O.rage_other_delay_shot or 0) == 2 then
+        local vx, vy = getCharVelocity(PLAYER_PED)
+        if vx * vx + vy * vy > 1 then
+            if O.rage_sel_quick_stop then setGameKeyState(0, 0); setGameKeyState(1, 0) end
+            return
+        end
+    end
+    if O.rage_sel_quick_stop then setGameKeyState(0, 0); setGameKeyState(1, 0) end
+    setGameKeyState(17, 255)
+end
+
 -- ============================================================ MISC: FEATURES
 local memory = require 'memory'
 
@@ -1691,7 +1864,8 @@ end
 local QS_WEAPONS = { [24] = true, [25] = true, [27] = false, [33] = true, [34] = true }
 local qsPending, qsBusy = false, false
 
-function sampev.onSendBulletSync()
+function sampev.onSendBulletSync(data)
+    pcall(RG.onBullet, data)
     if O.aa_enable and O.aa_mode == 4 then aaFlickUntil = os.clock() + (O.aa_flick_ms or 200) / 1000 end
     if O.m_feat_quick_switch and spawnedAt then qsPending = true end
 end
@@ -1867,7 +2041,7 @@ function main()
         local I = ready and mvInput(free) or nil
         aaTick(free, I)
         mvTick(free, I)
-        if ready then qsTick() end
+        if ready then qsTick(); RG.tick(free) end
         logTick()
         setAntiAfk(ready and O.m_feat_prevent_afk_kick)
         if os.clock() - lastIconCheck > 1.5 then
