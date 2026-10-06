@@ -9,8 +9,9 @@
     Rage/Legit/ESP/Misc — ТОЛЬКО интерфейс (значения сохраняются в конфиг).
     Anti-Aim (крутилка) — рабочий: Rage -> ANTI-AIM -> Enabled, настройки в «Yaw ›».
     Крутилку видят ДРУГИЕ игроки (подмена поворота в PlayerSync) — и стоя, и на бегу.
-    «Show Locally» крутит и вашего персонажа — стоя, на бегу и в прыжке. Крутится только
-    отрисовка (хук CPed::Render), реальный поворот остаётся у игры, поэтому бег/прыжок нормальные.
+    «Show Locally» РЕАЛЬНО крутит персонажа — стоя, на бегу и в прыжке. Движение и прыжок
+    скрипт делает сам (камера + WASD/стик), игре ввод движения не отдаётся.
+    Автообновление: при запуске проверяет GitHub, вручную — /ragemd_update.
 
     Шрифты (необязательно): moonloader\resource\rage-mod\SSTMedium.TTF, SSTBold.TTF, fa-solid-900.ttf
     Активация: /ragemd или клавиша (по умолчанию Insert, меняется в меню профиля в тулбаре).
@@ -19,7 +20,7 @@
 
 script_name('rage-mod')
 script_author('rage-mod')
-script_version('3.4.0')
+script_version('3.5.0')
 
 local imgui    = require 'mimgui'
 local encoding = require 'encoding'
@@ -1341,123 +1342,105 @@ function sampev.onSendPlayerSync(data)
     q[3] = aaSign * math.sin(h / 2)
 end
 
--- ---------- визуальная крутилка у себя («Show Locally») ----------
--- GTA двигает педа по его настоящему повороту, поэтому настоящий heading мы НЕ трогаем
--- (бег, спринт, прыжки, коллизии — полностью нативные). Крутим только то, что рисуется:
--- перехватываем CPed::PreRender / CPed::Render в vtable CPlayerPed и на время отрисовки
--- подменяем матрицу поворота нашего педа, а после Render возвращаем исходную.
-pcall(ffi.cdef, [[
-    int VirtualProtect(void* addr, unsigned long size, unsigned long newProt, unsigned long* oldProt);
-]])
+-- ---------- настоящая крутилка у себя («Show Locally») на бегу и в прыжке ----------
+-- Персонаж РЕАЛЬНО крутится (setCharHeading каждый кадр, в синк уходит этот же поворот).
+-- GTA двигает педа по его повороту, поэтому игре мы движение не отдаём:
+--   * обнуляем ей стики (setGameKeyState) — анимация бега не тащит педа по «крутящемуся» взгляду;
+--   * сами двигаем педа туда, куда жмёте (камера + стик), со скоростью ходьбы/бега/спринта;
+--   * прыжок делаем сами (вертикальная скорость), в воздухе управляем горизонтальной скоростью.
+local BTN_JUMP, BTN_SPRINT = 14, 16
+local AA_SPEED_WALK, AA_SPEED_RUN, AA_SPEED_SPRINT = 1.8, 5.4, 8.2
+local AA_JUMP_VZ = 5.5
+local aaPos, aaLast, aaJumpHeld, aaJumpT = nil, 0, false, 0
 
-local ADDR_PED_PRERENDER, ADDR_PED_RENDER, ADDR_ENTITY_UPDATERW = 0x5E8A20, 0x5E7680, 0x446F90
-local ENTITY_FN = 'void(__thiscall*)(void*)'
-local updateRW = ffi.cast(ENTITY_FN, ADDR_ENTITY_UPDATERW)
-
-local vis = {
-    on = false, ped = 0,          -- обновляется в aaTick (опкоды в колбэках рендера не вызываем)
-    hooked = false, failed = false,
-    vt = nil, iPre = nil, iRen = nil, origPre = nil, origRen = nil, cbPre = nil, cbRen = nil,
-    saved = ffi.new('float[8]'), rotated = false,
-}
-
-local function visRestore()
-    if not vis.rotated then return end
-    vis.rotated = false
-    local ptr = vis.ped
-    if ptr == 0 then return end
-    local mp = rd32(ptr + 0x14)
-    if mp == 0 then return end
-    local m = ffi.cast('float*', mp)
-    m[0], m[1], m[2], m[4], m[5], m[6] = vis.saved[0], vis.saved[1], vis.saved[2], vis.saved[3], vis.saved[4], vis.saved[5]
-    updateRW(ffi.cast('void*', ptr))
+local function camHeading()
+    local cx, cy = getActiveCameraCoordinates()
+    local px, py = getActiveCameraPointAt()
+    return math.deg(math.atan2(-(px - cx), py - cy))
 end
 
-local function visApply(this)
-    local ptr = tonumber(ffi.cast('uint32_t', this))
-    if not vis.on or ptr ~= vis.ped or vis.rotated then return end
-    local mp = rd32(ptr + 0x14)
-    if mp == 0 then return end
-    local m = ffi.cast('float*', mp)
-    vis.saved[0], vis.saved[1], vis.saved[2] = m[0], m[1], m[2]
-    vis.saved[3], vis.saved[4], vis.saved[5] = m[4], m[5], m[6]
-    local h = math.rad(aaSpinAngle())
-    local c, s = math.cos(h), math.sin(h)
-    m[0], m[1], m[2] = c, s, 0      -- right
-    m[4], m[5], m[6] = -s, c, 0     -- forward
-    vis.rotated = true
-    updateRW(this)
+-- позиция персонажа в матрице (только X/Y — высоту оставляем игре: склоны, лестницы, гравитация)
+local function pedPos()
+    local ptr = getCharPointer(PLAYER_PED)
+    if not ptr or ptr == 0 then return nil end
+    local m = rd32(ptr + 0x14)
+    if m == 0 then return nil end
+    return ffi.cast('float*', m + 0x30)
 end
 
-local function vtWrite(i, fnAddr)
-    local slot = vis.vt + i * 4
-    local old = ffi.new('unsigned long[1]')
-    ffi.C.VirtualProtect(ffi.cast('void*', slot), 4, 0x40, old)
-    ffi.cast('uint32_t*', slot)[0] = fnAddr
-    ffi.C.VirtualProtect(ffi.cast('void*', slot), 4, old[0], old)
-end
+local function aaMoveTick(free)
+    local now = os.clock()
+    local dt = clamp(now - aaLast, 0, 0.1)
+    aaLast = now
 
-local function visHook(pedPtr)
-    if vis.hooked or vis.failed or pedPtr == 0 then return end
-    local vt = rd32(pedPtr)
-    local iPre, iRen
-    for i = 10, 24 do
-        local f = rd32(vt + i * 4)
-        if f == ADDR_PED_PRERENDER then iPre = i end
-        if f == ADDR_PED_RENDER then iRen = i end
+    -- ввод игрока (читаем ДО обнуления)
+    local lx, ly = getPositionOfAnalogueSticks(0)
+    if not free then lx, ly = 0, 0 end
+    local jumpDown = free and isButtonPressed(PLAYER_HANDLE, BTN_JUMP)
+    local sprint = free and isButtonPressed(PLAYER_HANDLE, BTN_SPRINT)
+    local walk = free and isKeyDown(0x12)
+
+    -- игре движение и прыжок не даём
+    setGameKeyState(0, 0)
+    setGameKeyState(1, 0)
+    setGameKeyState(BTN_JUMP, 0)
+
+    local moving = lx ~= 0 or ly ~= 0
+    local dx, dy, speed = 0, 0, 0
+    if moving then
+        local mh = math.rad((camHeading() + math.deg(math.atan2(-lx, -ly))) % 360)
+        local k = math.min(1, math.sqrt(lx * lx + ly * ly) / 128)
+        speed = (sprint and AA_SPEED_SPRINT or (walk and AA_SPEED_WALK or AA_SPEED_RUN)) * k
+        dx, dy = -math.sin(mh), math.cos(mh)
     end
-    if not iPre or not iRen then
-        vis.failed = true
-        chat('{E03D3D}Show Locally: не нашёл CPed::Render (не 1.0 US exe или vtable уже перехвачена) — крутилка у себя только стоя.')
+
+    local x, y, z = getCharCoordinates(PLAYER_PED)
+    local _, _, vz = getCharVelocity(PLAYER_PED)
+    local inAir = isCharInAir(PLAYER_PED)
+
+    -- прыжок: по нажатию, только с земли
+    if jumpDown and not aaJumpHeld and not inAir and now - aaJumpT > 0.35 then
+        aaJumpT = now
+        setCharVelocity(PLAYER_PED, dx * speed, dy * speed, AA_JUMP_VZ)
+        aaPos = nil
+        aaJumpHeld = jumpDown
         return
     end
-    vis.vt, vis.iPre, vis.iRen = vt, iPre, iRen
-    vis.origPre = ffi.cast(ENTITY_FN, ADDR_PED_PRERENDER)
-    vis.origRen = ffi.cast(ENTITY_FN, ADDR_PED_RENDER)
-    vis.cbPre = ffi.cast(ENTITY_FN, function(this)
-        pcall(visApply, this)
-        vis.origPre(this)
-    end)
-    vis.cbRen = ffi.cast(ENTITY_FN, function(this)
-        pcall(visApply, this)        -- если PreRender пропущен — повернём здесь
-        vis.origRen(this)
-        if tonumber(ffi.cast('uint32_t', this)) == vis.ped then pcall(visRestore) end
-    end)
-    vtWrite(iPre, tonumber(ffi.cast('uint32_t', vis.cbPre)))
-    vtWrite(iRen, tonumber(ffi.cast('uint32_t', vis.cbRen)))
-    vis.hooked = true
-end
+    aaJumpHeld = jumpDown
 
-local function visUnhook()
-    if not vis.hooked then return end
-    vis.on = false
-    pcall(visRestore)
-    vtWrite(vis.iPre, ADDR_PED_PRERENDER)
-    vtWrite(vis.iRen, ADDR_PED_RENDER)
-    vis.cbPre:free(); vis.cbRen:free()
-    vis.hooked = false
+    if inAir or now - aaJumpT < 0.15 then
+        -- в воздухе физика работает со скоростью — управляем ей (без ввода сохраняем инерцию)
+        if moving then setCharVelocity(PLAYER_PED, dx * speed, dy * speed, vz) end
+        aaPos = nil
+        return
+    end
+
+    -- на земле: двигаем позицию сами
+    if not aaPos or math.abs(aaPos.x - x) + math.abs(aaPos.y - y) > 2.5 then aaPos = { x = x, y = y } end
+    if not moving then
+        aaPos.x, aaPos.y = x, y
+        return
+    end
+    local nx, ny = aaPos.x + dx * speed * dt, aaPos.y + dy * speed * dt
+    -- не проходим сквозь стены/машины/объекты (проверка чуть впереди, на уровне пояса)
+    if isLineOfSightClear(aaPos.x, aaPos.y, z, nx + dx * 0.45, ny + dy * 0.45, z, true, true, false, true, false) then
+        aaPos.x, aaPos.y = nx, ny
+    end
+    local p = pedPos()
+    if p then p[0], p[1] = aaPos.x, aaPos.y end
+    -- скорость для синхронизации (другие видят плавный бег, а не телепорты)
+    setCharVelocity(PLAYER_PED, dx * speed, dy * speed, vz)
 end
 
 local function aaTick(free)
     localSpinning = false
-    -- если педа не отрисовали в прошлом кадре — возвращаем настоящую матрицу до обработки физики
-    pcall(visRestore)
-    local ptr = doesCharExist(PLAYER_PED) and getCharPointer(PLAYER_PED) or 0
-    vis.ped = ptr or 0
-    vis.on = false
-    if not aaActive() then return end
-    if O.aa_local and O.aa_mode == 0 then
-        visHook(vis.ped)
-        if vis.hooked then
-            vis.on = true      -- крутим только картинку, в синк уходит aaYaw → то же aaSpinAngle()
-        elseif not isCharInAir(PLAYER_PED) then
-            -- запасной вариант без хука: крутим настоящий heading, но только стоя
-            local lx, ly = getPositionOfAnalogueSticks(0)
-            if not free or (lx == 0 and ly == 0) then
-                setCharHeading(PLAYER_PED, aaSpinAngle())
-                localSpinning = true
-            end
-        end
+    if not aaActive() then aaPos = nil; return end
+    if O.aa_local and O.aa_mode == 0 and not isCharInWater(PLAYER_PED) then
+        setCharHeading(PLAYER_PED, aaSpinAngle())
+        localSpinning = true
+        aaMoveTick(free)
+    else
+        aaPos = nil
     end
     -- частая отправка синхронизации, чтобы вращение у других было плавным
     if O.aa_force and os.clock() - lastForce > 0.04 then
@@ -1501,11 +1484,51 @@ imgui.OnInitialize(function()
     for k, v in pairs(FS[1]) do F[k] = v end
 end)
 
+-- ============================================================ AUTO-UPDATE (GitHub)
+local UPDATE_URL = 'https://raw.githubusercontent.com/denismaslov769-lab/rage-mod/main/rage-mod.lua'
+
+local function verNum(v)
+    local a, b, c = tostring(v or ''):match('(%d+)%.?(%d*)%.?(%d*)')
+    return (tonumber(a) or 0) * 1000000 + (tonumber(b) or 0) * 1000 + (tonumber(c) or 0)
+end
+
+local function checkUpdate(manual)
+    local dl = require('moonloader').download_status
+    local tmp = getWorkingDirectory() .. '\\rage-mod.update.tmp'
+    downloadUrlToFile(UPDATE_URL .. '?t=' .. os.time(), tmp, function(_, status)
+        if status ~= dl.STATUS_ENDDOWNLOADDATA then return end
+        lua_thread.create(function()
+            wait(100)
+            local f = io.open(tmp, 'rb')
+            if not f then if manual then chat('обновление: не удалось скачать') end return end
+            local code = f:read('*a'); f:close(); os.remove(tmp)
+            local remote = code:match("script_version%('([^']+)'%)")
+            if not remote or #code < 10000 then
+                if manual then chat('обновление: GitHub вернул не скрипт (репозиторий приватный?)') end
+                return
+            end
+            if verNum(remote) <= verNum(thisScript().version) then
+                if manual then chat('у вас последняя версия {4E83FF}v' .. thisScript().version) end
+                return
+            end
+            local out = io.open(thisScript().path, 'wb')
+            if not out then chat('{E03D3D}обновление: нет доступа к файлу скрипта') return end
+            out:write(code); out:close()
+            chat('обновлено до {3DE07A}v' .. remote .. '{FFFFFF}, перезагружаюсь...')
+            saveConfig()
+            wait(300)
+            thisScript():reload()
+        end)
+    end)
+end
+
 function main()
     if not isSampLoaded() or not isSampfuncsLoaded() then return end
     while not isSampAvailable() do wait(100) end
     loadConfig()
     sampRegisterChatCommand('ragemd', toggleMenu)
+    sampRegisterChatCommand('ragemd_update', function() checkUpdate(true) end)
+    checkUpdate(false)
     refreshWeaponIcons(true)
     chat('загружен. Меню: {4E83FF}/ragemd')
 
@@ -1531,7 +1554,6 @@ end
 
 function onScriptTerminate(scr)
     if scr == thisScript() then
-        visUnhook()
         saveConfig()
         releaseWeaponIcons()
     end
