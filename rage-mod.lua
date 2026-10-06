@@ -20,7 +20,7 @@
 
 script_name('rage-mod')
 script_author('rage-mod')
-script_version('4.8.21')
+script_version('4.8.22')
 
 local imgui    = require 'mimgui'
 local encoding = require 'encoding'
@@ -3486,20 +3486,27 @@ function VIS.chamsColor(s, now, mi, mn, hp)
     local r, g, b = c[1], c[2], c[3]
     local a = math.min(c[4] or 255, s.alpha)
     local fr = mn > 1 and mi / (mn - 1) or 0
-    if mode == 2 then r, g, b = r * 1.35, g * 1.35, b * 1.35
-    elseif mode == 3 then
-        local k = t * 2.2 + mi * 0.6
-        r = 128 + 127 * math.sin(k); g = 128 + 127 * math.sin(k + 2.09); b = 128 + 127 * math.sin(k + 4.19)
-    elseif mode == 4 then a = math.min(a, 110)
-    elseif mode == 5 then
-        local p = 0.55 + 0.45 * math.sin(t * 5)
-        r, g, b = r * p + 90 * (1 - p), g * p + 90 * (1 - p), b * p + 90 * (1 - p)
-    elseif mode == 6 then r, g, b = VIS.lerpc(c, c2, 0.5 + 0.5 * math.sin(t * 4))
+    if mode == 2 then -- Flat: ровный цвет без теней (освещение задаётся в paintPed)
+    elseif mode == 3 then -- Water Flow: текстура остаётся, по телу бегут светлые «струи»
+        local k = 0.5 + 0.5 * math.sin(t * 3 - mi * 0.9)
+        local p = 0.55 + 0.75 * k * k
+        r, g, b = r * p, g * p, b * p; a = math.min(a, 210)
+    elseif mode == 4 then -- Glass: текстура видна, светлый полупрозрачный оттенок
+        r, g, b = VIS.lerpc(c, { 255, 255, 255 }, 0.45); a = math.min(a, 90)
+    elseif mode == 5 then -- Glow: яркий неон, дышит к белому
+        local p = 0.5 + 0.5 * math.sin(t * 5)
+        r, g, b = VIS.lerpc(c, { 255, 255, 255 }, 0.35 * p)
+    elseif mode == 6 then -- Pulse: яркость от тёмного к полной
+        local p = 0.2 + 0.8 * (0.5 + 0.5 * math.sin(t * 4))
+        r, g, b = r * p, g * p, b * p
     elseif mode == 7 then local q = VIS.rainbow(mi * 0.08 + t * 0.1); r, g, b = q[1], q[2], q[3]
     elseif mode == 8 then r, g, b = VIS.lerpc(c, c2, fr)
     elseif mode == 9 then if math.floor(t * 8) % 2 == 0 then r, g, b = c2[1], c2[2], c2[3] end
-    elseif mode == 10 then local p = 0.75 + 0.5 * math.max(0, math.sin(t * 2 + mi)); r, g, b = r * p, g * p, b * p
-    elseif mode == 11 then a = math.min(a, 50 + 40 * math.sin(t * 3))
+    elseif mode == 10 then -- Metallic: блик полосой проходит по телу
+        local k = math.max(0, math.sin(t * 2 - fr * 6)) ^ 6
+        r, g, b = VIS.lerpc({ r * 0.55, g * 0.55, b * 0.55 }, { 255, 255, 255 }, k * 0.85)
+    elseif mode == 11 then -- Ghost: текстура, бледный цвет, мерцающая прозрачность
+        r, g, b = VIS.lerpc(c, { 255, 255, 255 }, 0.6); a = math.min(a, 70 + 50 * math.sin(t * 3))
     elseif mode == 12 then
         local k = 0.5 + 0.5 * math.sin(t * 1.5 + fr * 3)
         if k < 0.5 then r, g, b = 255 * k * 2, 40 * k, 0 else r, g, b = 255, 40 + 215 * (k - 0.5) * 2, 120 * (k - 0.5) * 2 end
@@ -3509,10 +3516,12 @@ function VIS.chamsColor(s, now, mi, mn, hp)
     elseif mode == 16 then
         local k = 0.5 + 0.5 * math.sin(t * 9 + mi * 1.3) * math.sin(t * 5.3)
         r, g, b = 255, 60 + 170 * k, 20 * k
-    elseif mode == 17 then local k = 0.5 + 0.5 * math.sin(t * 2 + mi); r, g, b = 140 + 80 * k, 210 + 45 * k, 255; a = math.min(a, 200)
+    elseif mode == 17 then local k = 0.5 + 0.5 * math.sin(t * 2 + mi); r, g, b = 150 + 70 * k, 215 + 40 * k, 255; a = math.min(a, 220)
     elseif mode == 18 then
         local k = 0.5 + 0.5 * math.sin(t * 1.2 + mi * 0.9)
         r, g, b = 60 + 120 * k, 20 + 40 * (1 - k), 140 + 115 * k
+        local h = math.sin((mi + 1) * 12.9898 + math.floor(t * 6) * 78.233) * 43758.5453
+        if h - math.floor(h) < 0.08 then r, g, b = 255, 255, 255 end   -- звёзды
     elseif mode == 19 then local k = 0.5 + 0.5 * math.sin(t * 6 + mi); r, g, b = 90 + 60 * k, 255, 40 + 40 * k
     end
     local br = s.br
@@ -3520,12 +3529,15 @@ function VIS.chamsColor(s, now, mi, mn, hp)
 end
 VIS.LIGHTS = { false, { 2.5, 0, 1 }, { 6, 0, 0 }, { 0.25, 0, 0.35 }, { 10, 1, 1 } }
 VIS.matN = {}
+VIS.CH_KEEPTEX = { [3] = true, [4] = true, [11] = true, [17] = true }
+-- у части типов своё освещение (иначе Solid/Flat/Glow/Metallic выглядели одинаково)
+VIS.CH_FORCELT = { [2] = { 6, 0, 0 }, [4] = { 2.5, 0, 1 }, [5] = { 10, 1, 1 }, [10] = { 0.6, 1, 1.6 }, [17] = { 2.5, 0, 1 } }
 function VIS.paintPed(ped, s, now, hp)
     local ch = VIS.ch
     local mode = s and s.mode or 0
-    local notex = mode > 0 and s.tex == 1 and mode ~= 4 and mode ~= 11
-    local lt = mode > 0 and VIS.LIGHTS[(s.light or 0) + 1] or false
-    if mode == 10 and not lt then lt = { 1.5, 1, 1 } end
+    -- типы с текстурой (вода, стекло, призрак, лёд) всегда её оставляют
+    local notex = mode > 0 and s.tex == 1 and not VIS.CH_KEEPTEX[mode]
+    local lt = mode > 0 and (VIS.CH_FORCELT[mode] or VIS.LIGHTS[(s.light or 0) + 1]) or false
     local mi, mn = 0, VIS.matN[ped] or 8
     local n = VIS.pedMaterials(ped, function(g, mat)
         local c = ffi.cast('uint8_t*', mat + 4)
@@ -3581,7 +3593,7 @@ function VIS.chamsTick(ready, now)
     local sT, sL = VIS.chGet(VIS.SUB_CH_TEAM), VIS.chGet(VIS.SUB_CH_LOC)
     local want = ready and ((O.pl_enemy_enabled and (sV.mode + sH.mode + sS.mode + sT.mode) > 0) or sL.mode > 0)
     if not want then VIS.restoreAll(); return end
-    if now - VIS.ch.last < 0.03 or not VIS.chInit() then return end
+    if not VIS.chInit() then return end
     VIS.ch.last = now
     TR.T('vis.chams')
     if sL.mode > 0 then
@@ -3604,23 +3616,44 @@ function VIS.chamsTick(ready, now)
             VIS.ch.painted[ped] = nil
         end
     end
+    -- материалы общие на скин: у всех игроков с одним скином одна и та же покраска.
+    -- Раньше каждый игрок перекрашивал общий скин под себя (видим/за стеной/союзник) -> мигание.
+    -- Теперь на каждый скин выбираем одно состояние по приоритету: выстрел > видим > за стеной > союзник.
+    VIS.chVisT = VIS.chVisT or {}
+    local best, prio = {}, {}
     for _, e in ipairs(VIS.list) do
         if doesCharExist(e.ped) then
-            local s = sV
-            if not e.vis and sH.mode > 0 then s = sH end
-            if e.team then s = sT end
-            if sS.mode > 0 and VIS.shot[e.id] and now - VIS.shot[e.id] < 0.3 then s = sS end
+            -- гистерезис видимости: короткие провалы LOS не переключают видимые/скрытые чамсы туда-сюда
+            if e.vis then VIS.chVisT[e.ped] = now end
+            local vis = now - (VIS.chVisT[e.ped] or -1) < 0.15
+            local s, p = sV, 3
+            if not vis and sH.mode > 0 then s, p = sH, 2 end
+            if e.team then s, p = sT, 1 end
+            if sS.mode > 0 and VIS.shot[e.id] and now - VIS.shot[e.id] < 0.3 then s, p = sS, 4 end
             -- геометрия общая на скин: покраска врага с вашим скином покрасит и вас.
             -- Такого врага не красим (рисуем ему оверлей), а свою модель держим в оригинале / в своих чамсах.
-            e.sameSkin = getCharModel(e.ped) == myModel
+            local model = getCharModel(e.ped)
+            e.sameSkin = model == myModel
             if e.sameSkin and (not O.chm_same or sL.mode > 0) then s = nil end
-            if s and s.mode > 0 then VIS.ch.dirty = true else s = nil end
+            if not (s and s.mode > 0) then s, p = nil, 0 end
             if not (e.sameSkin and sL.mode > 0) then
-                local okp = pcall(VIS.paintPed, e.ped, s, now, e.hp or sampGetPlayerHealth(e.id))
-                if okp and s then VIS.ch.painted[e.ped] = getCharModel(e.ped) else VIS.ch.painted[e.ped] = nil end
+                e.chModel = model
+                if prio[model] == nil or p > prio[model] then best[model], prio[model] = s or false, p end
+            else
+                e.chModel = nil
             end
         end
     end
+    for _, e in ipairs(VIS.list) do
+        local model = e.chModel
+        if model and doesCharExist(e.ped) then
+            local s = best[model] or nil
+            if s then VIS.ch.dirty = true end
+            local okp = pcall(VIS.paintPed, e.ped, s, now, e.hp or sampGetPlayerHealth(e.id))
+            if okp and s then VIS.ch.painted[e.ped] = model else VIS.ch.painted[e.ped] = nil end
+        end
+    end
+    for ped in pairs(VIS.chVisT) do if not inList[ped] then VIS.chVisT[ped] = nil end end
     -- страховка: своя модель всегда в оригинале, если свои чамсы выключены и красить свой скин не просили
     if sL.mode == 0 and not O.chm_same then pcall(VIS.paintPed, PLAYER_PED, nil) end
 end
