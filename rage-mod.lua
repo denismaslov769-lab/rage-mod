@@ -20,7 +20,7 @@
 
 script_name('rage-mod')
 script_author('rage-mod')
-script_version('4.8.5')
+script_version('4.8.6')
 
 local imgui    = require 'mimgui'
 local encoding = require 'encoding'
@@ -2770,10 +2770,12 @@ end
 -- Выстрел самим движком: CWeapon::Fire (0x742300, GTA SA 1.0 US) с владельцем = наш пед.
 -- Это тот же путь, что и обычный выстрел: SA-MP сам шлёт bullet sync, тратятся патроны, есть звук и вспышка.
 -- В прыжке игра просто не вызывает Fire (мешает задача прыжка) — вызываем сами.
+-- ВАЖНО: вызываем через callMethod (обычная C-функция MoonLoader), а НЕ через ffi.cast-указатель.
+-- Внутри Fire SA-MP синхронно шлёт bullet sync -> MoonLoader вызывает наш onSendBulletSync.
+-- Повторный вход в Lua из FFI-вызова LuaJIT не поддерживает: состояние VM портилось,
+-- и после нескольких выстрелов ломались сайлент и вся стрельба. Из callMethod повторный вход разрешён.
+RG.jaBuf = ffi.new('float[6]')
 function RG.jaEngineFire(w, ox, oy, oz, tx, ty, tz, tped)
-    if not RG.jaFireFn then
-        RG.jaFireFn = ffi.cast('bool(__thiscall*)(void*, void*, void*, void*, void*, void*, void*)', 0x742300)
-    end
     local ped = getCharPointer(PLAYER_PED)
     if not ped or ped == 0 then return false, 'no ped' end
     local slot = ffi.cast('uint8_t*', ped + 0x718)[0]
@@ -2782,14 +2784,16 @@ function RG.jaEngineFire(w, ox, oy, oz, tx, ty, tz, tped)
     if wt[0] ~= w then return false, 'slot ' .. tostring(wt[0]) end
     if wt[1] == 2 then return false, 'reloading' end         -- m_nState: 2 = перезарядка
     if wt[2] <= 0 then return false, 'empty clip' end        -- m_nAmmoInClip
-    local o = ffi.new('float[3]', ox, oy, oz)
-    local tv = ffi.new('float[3]', tx, ty, tz)
-    local te = nil
-    if tped then local okp, pp = pcall(getCharPointer, tped); if okp and pp and pp ~= 0 then te = ffi.cast('void*', pp) end end
-    local r = RG.jaFireFn(ffi.cast('void*', wp), ffi.cast('void*', ped), o, o, te, tv, nil)
-    return r and true or false, 'fire=' .. tostring(r)
+    local b = RG.jaBuf
+    b[0], b[1], b[2], b[3], b[4], b[5] = ox, oy, oz, tx, ty, tz
+    local base = tonumber(ffi.cast('uintptr_t', b))
+    local te = 0
+    if tped then local okp, pp = pcall(getCharPointer, tped); if okp and pp and pp ~= 0 then te = pp end end
+    -- bool __thiscall CWeapon::Fire(CEntity* owner, CVector* origin, CVector* muzzle, CEntity* target, CVector* targetPos, CVector* driveBy)
+    local r = callMethod(0x742300, wp, 6, 0, ped, base, base, te, base + 12, 0)
+    r = r and bit.band(r, 0xFF) ~= 0
+    return r, 'fire=' .. tostring(r)
 end
-if jit then jit.off(RG.jaEngineFire, true) end
 -- анимация выстрела верхней частью тела (ноги продолжают прыжок)
 RG.JA_ANIM = { [22] = { 'COLT45', 'colt45_fire' }, [23] = { 'SILENCED', 'Silence_fire' }, [24] = { 'PYTHON', 'python_fire' },
     [25] = { 'SHOTGUN', 'shotgun_fire' }, [26] = { 'COLT45', 'colt45_fire' }, [27] = { 'BUDDY', 'buddy_fire' },
