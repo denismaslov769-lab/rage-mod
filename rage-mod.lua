@@ -20,7 +20,7 @@
 
 script_name('rage-mod')
 script_author('rage-mod')
-script_version('4.8.10')
+script_version('4.8.11')
 
 local imgui    = require 'mimgui'
 local encoding = require 'encoding'
@@ -2382,6 +2382,32 @@ function RG.originOf(data)
     return o.x, o.y, o.z
 end
 
+-- точки, от которых может лететь пуля персонажа: точка из bullet sync, голова, правая рука (ствол), плечи.
+-- Цель видима, если её видно ХОТЯ БЫ из одной — так сайлент не теряет цели (одна точка часто упирается
+-- в край укрытия / объект рядом), но и камера, висящая за углом, больше не считается.
+function RG.origins(ox, oy, oz)
+    local list = {}
+    if ox then list[#list + 1] = { ox, oy, oz } end
+    local x, y, z = getCharCoordinates(PLAYER_PED)
+    list[#list + 1] = { x, y, z + 0.6 }
+    local okp, ptr = pcall(getCharPointer, PLAYER_PED)
+    if okp and ptr and ptr ~= 0 then
+        for _, bid in ipairs({ 8, 25 }) do                        -- 8 голова, 25 правая кисть
+            local okb, bx, by, bz = pcall(VIS.bone, ptr, bid)
+            if okb and bx and math.abs(bx - x) < 2 and math.abs(by - y) < 2 and math.abs(bz - z) < 2 then
+                list[#list + 1] = { bx, by, bz }
+            end
+        end
+    end
+    return list
+end
+function RG.visAny(orgs, tx, ty, tz)
+    for _, o in ipairs(orgs) do
+        if isLineOfSightClear(o[1], o[2], o[3], tx, ty, tz, true, true, false, true, false) then return true end
+    end
+    return false
+end
+
 function RG.myId()
     local ok, id = sampGetPlayerIdByCharHandle(PLAYER_PED)
     return ok and id or -1
@@ -2407,7 +2433,7 @@ function RG.find(weapon, strict, ox, oy, oz)
     local dmg = RG.DMG[weapon]
     if not dmg then return nil end
     local cx, cy, cz, fx, fy, fz = RG.cam()
-    if not ox then ox, oy, oz = RG.eye() end
+    local orgs = (not O.rage_main_aim_through_walls) and RG.origins(ox, oy, oz) or nil
     local fov = O.rage_main_field_of_view or 180
     local walls = O.rage_main_aim_through_walls
     local prefer = O.rage_sel_prefer or 0
@@ -2441,7 +2467,7 @@ function RG.find(weapon, strict, ox, oy, oz)
                             if dist > 0.5 and dist < 300 then
                                 local dot = (dx * fx + dy * fy + dz * fz) / dist
                                 local ang = math.deg(math.acos(math.max(-1, math.min(1, dot))))
-                                if ang <= fov and (walls or TR.T('rg.find.los') or isLineOfSightClear(ox, oy, oz, tx, ty, tz, true, true, false, true, false)) then
+                                if ang <= fov and (walls or TR.T('rg.find.los') or RG.visAny(orgs, tx, ty, tz)) then
                                     local score = (prefer == 0) and (hp * 1000 + ang) or ang
                                     if score < bestScore then
                                         bestScore = score
@@ -2563,6 +2589,7 @@ function RG.onBullet(data)
     if silent and not tt and hc > 0 and math.random(100) > hc then return end
     -- триггер (в т.ч. «наперёд» — цель ещё за углом) приоритетнее: он уже решил, в кого стрелять
     local t = tt or RG.find(w, false, RG.originOf(data))
+    TR.E(('silent on=%s tt=%s t=%s mb=%s'):format(tostring(silent), tt and tt.id or '-', t and t.id or '-', tostring(O.mb_on)))
     if not t then
         -- сайлент цель не нашёл (например, все за стеной) — пробуем Magic Bullet
         if RG.magic(data) then return end
