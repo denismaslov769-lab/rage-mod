@@ -20,7 +20,7 @@
 
 script_name('rage-mod')
 script_author('rage-mod')
-script_version('4.3.0')
+script_version('4.5.0')
 
 local imgui    = require 'mimgui'
 local encoding = require 'encoding'
@@ -267,6 +267,60 @@ local RU = {
     ['Mid-Tier'] = 'Средние', ['Rifles'] = 'Винтовки', ['Box'] = 'Бокс', ['Name'] = 'Имя', ['Health'] = 'HP',
     ['Dist'] = 'Дист.', ['Distance'] = 'Дистанция', ['offline'] = 'оффлайн', ['Profile'] = 'Профиль',
 }
+do
+    local add = {
+        ['BACKTRACK'] = 'БЭКТРЕК',
+        ['Backtrack'] = 'Бэктрек (призрак)',
+        ['Backtrack Time'] = 'Задержка призрака',
+        ['Hit Radius'] = 'Радиус попадания',
+        ['Hit Mode'] = 'Режим попадания',
+        ['Ghost Only'] = 'Только призрак',
+        ['Whole Trail'] = 'Весь след',
+        ['Send Damage'] = 'Отправлять урон',
+        ['Ghost Style'] = 'Вид призрака',
+        ['Hidden'] = 'Скрыт',
+        ['Ghost Color'] = 'Цвет призрака',
+        ['Show Trail'] = 'Показывать след',
+        ['VISIBLE CHAMS'] = 'ЧАМСЫ (ВИДИМ)',
+        ['HIDDEN CHAMS'] = 'ЧАМСЫ (ЗА СТЕНОЙ)',
+        ['ON SHOT CHAMS'] = 'ЧАМСЫ (ВЫСТРЕЛ)',
+        ['TEAMMATE CHAMS'] = 'ЧАМСЫ СОЮЗНИКОВ',
+        ['LOCAL CHAMS'] = 'СВОИ ЧАМСЫ',
+        ['OVERLAY (THROUGH WALLS)'] = 'ОВЕРЛЕЙ (СКВОЗЬ СТЕНЫ)',
+        ['Visible'] = 'Видимые',
+        ['Teammates'] = 'Союзники',
+        ['Overlay (walls)'] = 'Оверлей (сквозь стены)',
+        ['Type'] = 'Тип',
+        ['Second Color'] = 'Второй цвет',
+        ['Opacity'] = 'Непрозрачность',
+        ['Animation Speed'] = 'Скорость анимации',
+        ['Pulse'] = 'Пульс',
+        ['Strobe'] = 'Стробоскоп',
+        ['Metallic'] = 'Металл',
+        ['Ghost'] = 'Призрак',
+        ['Heat'] = 'Жар',
+        ['Two-Tone'] = 'Двухцветный',
+        ['Wave'] = 'Волна',
+        ['Fire'] = 'Огонь',
+        ['Ice'] = 'Лёд',
+        ['Galaxy'] = 'Галактика',
+        ['Dark'] = 'Тёмное',
+        ['Neon'] = 'Неон',
+        ['Filled'] = 'Заливка',
+        ['Glow Aura'] = 'Аура',
+        ['Neon Outline'] = 'Неоновый контур',
+        ['Hologram'] = 'Голограмма',
+        ['Dots'] = 'Точки',
+        ['Tube Skeleton'] = 'Трубчатый скелет',
+        ['Flame'] = 'Пламя',
+        ['When'] = 'Когда',
+        ['Visible Only'] = 'Только видимых',
+        ['Water Flow'] = 'Переливы',
+        ['Glass'] = 'Стекло',
+        ['Glow Outline'] = 'Свечение',
+    }
+    for k, v in pairs(add) do RU[k] = v end
+end
 do
     local add = {
         ['SKY & FOG'] = 'НЕБО И ТУМАН',
@@ -768,20 +822,38 @@ VIS.SUB_EXTRA = { title = 'EXTRA', rows = CARD('esp_x', {
     T_('Only Visible', false, 'esp_vis_only'),
     T_('Show Teammates', true, 'esp_team'),
 }) }
-VIS.SUB_CHAMS = { title = 'CHAMS', rows = CARD('chm', {
-    VIS.CLR('Visible Color', { 102, 124, 246 }, 'chm_vis'),
-    VIS.CLR('Hidden Color', { 255, 90, 120 }, 'chm_hid'),
-    VIS.CLR('On Shot Color', { 255, 255, 255 }, 'chm_shot'),
-    SL('Brightness', 50, 200, 100, '%d%%', false, 'chm_bright'),
-    T_('Paint Same Skin', true, 'chm_same'),
-    SEL('Texture', { 'Keep', 'Remove' }, 1, 'chm_tex'),
-    SEL('Lighting', { 'Normal', 'Bright', 'Flat (no light)' }, 1, 'chm_light'),
-    COL('Silhouette (walls)', true, { 255, 70, 110, 150 }, 'chm_sil'),
-    SEL('Silhouette When', { 'Behind Walls', 'Always' }, 0, 'chm_sil_when'),
-    SL('Silhouette Width', 50, 200, 100, '%d%%', false, 'chm_sil_w'),
-    T_('Silhouette Glow', true, 'chm_sil_glow'),
-    SEL('Local Player', CHAMS, 0, 'chm_local'),
-    VIS.CLR('Local Color', { 255, 200, 80 }, 'chm_local_c'),
+VIS.CHAMS_T = { 'Off', 'Solid', 'Flat', 'Water Flow', 'Glass', 'Glow Outline', 'Pulse', 'Rainbow', 'Gradient', 'Strobe',
+    'Metallic', 'Ghost', 'Heat', 'Health', 'Two-Tone', 'Wave', 'Fire', 'Ice', 'Galaxy', 'Toxic' }
+VIS.CH_LIGHT = { 'Normal', 'Bright', 'Flat (no light)', 'Dark', 'Neon' }
+-- набор настроек чамсов для одного состояния (видим / за стеной / выстрел / союзники / свой)
+function VIS.chSet(id, title, modeKey, defMode, colKey, c1, c2)
+    return { title = title, id = id, mk = modeKey, ck = colKey, rows = CARD(id, {
+        SEL('Type', VIS.CHAMS_T, defMode, modeKey),
+        VIS.CLR('Color', c1, colKey),
+        VIS.CLR('Second Color', c2, id .. '_c2'),
+        SEL('Texture', { 'Keep', 'Remove' }, 1, id .. '_tex'),
+        SEL('Lighting', VIS.CH_LIGHT, 1, id .. '_light'),
+        SL('Brightness', 20, 300, 100, '%d%%', false, id .. '_br'),
+        SL('Opacity', 10, 255, 255, '%d', false, id .. '_alpha'),
+        SL('Animation Speed', 1, 20, 6, '%d', false, id .. '_spd'),
+    }) }
+end
+VIS.SUB_CH_VIS  = VIS.chSet('chv', 'VISIBLE CHAMS', 'pl_model_player', 1, 'chm_vis', { 102, 124, 246 }, { 255, 255, 255 })
+VIS.SUB_CH_HID  = VIS.chSet('chh', 'HIDDEN CHAMS', 'pl_model_behind_walls', 5, 'chm_hid', { 255, 90, 120 }, { 255, 200, 80 })
+VIS.SUB_CH_SHOT = VIS.chSet('chs', 'ON SHOT CHAMS', 'pl_model_on_shot', 1, 'chm_shot', { 255, 255, 255 }, { 255, 80, 80 })
+VIS.SUB_CH_TEAM = VIS.chSet('cht', 'TEAMMATE CHAMS', 'chm_team_mode', 0, 'chm_team_c', { 90, 255, 150 }, { 255, 255, 255 })
+VIS.SUB_CH_LOC  = VIS.chSet('chl', 'LOCAL CHAMS', 'chm_local', 0, 'chm_local_c', { 255, 200, 80 }, { 255, 90, 200 })
+table.insert(VIS.SUB_CH_LOC.rows, T_('Paint Same Skin', true, 'chm_same'))
+VIS.SUB_CH_OV = { title = 'OVERLAY (THROUGH WALLS)', rows = CARD('chm_ov', {
+    COL('Enabled', true, { 255, 70, 110, 150 }, 'chm_sil'),
+    SEL('Style', { 'Filled', 'Glow Aura', 'Neon Outline', 'Hologram', 'Pulse', 'Gradient', 'Dots', 'Tube Skeleton', 'Flame' }, 0, 'chm_sil_style'),
+    VIS.CLR('Second Color', { 120, 160, 255, 200 }, 'chm_sil_c2'),
+    SEL('When', { 'Behind Walls', 'Always', 'Visible Only' }, 0, 'chm_sil_when'),
+    SEL('Color Mode', { 'Custom', 'By Health', 'Team Color' }, 0, 'chm_sil_cm'),
+    SL('Width', 50, 250, 100, '%d%%', false, 'chm_sil_w'),
+    T_('Glow', true, 'chm_sil_glow'),
+    SL('Animation Speed', 1, 20, 6, '%d', false, 'chm_sil_spd'),
+    SL('Max Distance', 20, 1000, 300, '%d m', false, 'chm_sil_max'),
 }) }
 VIS.SUB_TR = { title = 'BULLET TRACERS', rows = CARD('trc', {
     T_('Enabled', true, 'trc_on'),
@@ -902,6 +974,17 @@ VIS.SUB_TXT = { title = 'ESP TEXT', rows = CARD('txt', {
     SEL('Text Style', { 'Shadow', 'Outline', 'None' }, 0, 'esp_txt_ol'),
 }) }
 
+VIS.SUB_BT = { title = 'BACKTRACK', rows = CARD('bt', {
+    T_('Enabled', false, 'bt_on'),
+    SL('Backtrack Time', 50, 1000, 400, '%d ms', false, 'bt_time'),
+    SL('Hit Radius', 0.2, 1.5, 0.55, '%.2f m', true, 'bt_radius'),
+    SEL('Hit Mode', { 'Ghost Only', 'Whole Trail' }, 0, 'bt_mode'),
+    T_('Send Damage', true, 'bt_damage'),
+    SEL('Ghost Style', { 'Skeleton', 'Silhouette', 'Box', 'Hidden' }, 0, 'bt_style'),
+    VIS.CLR('Ghost Color', { 160, 200, 255, 200 }, 'bt_ghost'),
+    T_('Show Trail', true, 'bt_trail'),
+}) }
+
 local ROWS = {
     rage_main = CARD('rage_main', {
         T_('Enabled'), T_('Silent Aim', true), T_('Automatic Fire', true), T_('Aim Through Walls', true),
@@ -909,7 +992,7 @@ local ROWS = {
         SL('Field of View', 0, 180, 180, '%.1f°', true),
     }),
     rage_other = CARD('rage_other', {
-        DIS('History'),
+        CH('Backtrack', VIS.SUB_BT),
         SEL('Delay Shot', { 'Off', 'Damage', 'Accuracy' }, 1),
         SEL('Remove Spread', { 'Off', 'Partial', 'Full' }, 2),
         DIS('Duck Peek Assist'), DIS('Quick Peek Assist'), T_('Double Tap'),
@@ -950,8 +1033,9 @@ local ROWS = {
         CH('Weapon', VIS.SUB_WPN), CH('Skeleton', VIS.SUB_SKEL), CH('Extra', VIS.SUB_EXTRA),
     }),
     pl_model = CARD('pl_model', {
-        SEL('Player', CHAMS, 1), SEL('Behind Walls', CHAMS, 5), SEL('On Shot', CHAMS, 1),
-        CH('Chams Settings', VIS.SUB_CHAMS), COL('Soul Particles', false, { 150, 170, 255 }), COL('Glow', true, { 102, 124, 246 }),
+        CH('Visible', VIS.SUB_CH_VIS), CH('Behind Walls', VIS.SUB_CH_HID), CH('On Shot', VIS.SUB_CH_SHOT),
+        CH('Teammates', VIS.SUB_CH_TEAM), CH('Local Player', VIS.SUB_CH_LOC), CH('Overlay (walls)', VIS.SUB_CH_OV),
+        COL('Soul Particles', false, { 150, 170, 255 }), COL('Glow', true, { 102, 124, 246 }),
     }),
     w_view = CARD('w_view', {
         CH('View Options', VIS.SUB_VIEW), CH('Lighting', VIS.SUB_LIGHT), CH('Sun & Clouds', VIS.SUB_SUN),
@@ -1295,8 +1379,8 @@ local function cornerBox(dl, x1, y1, x2, y2, col)
 end
 
 PAGES.players = function(dl, b)
-    Card(dl, 'p1', b.x + 177, b.y + 86, 300, 231, 'ENEMY', ROWS.pl_enemy, 33)
-    Card(dl, 'p2', b.x + 177, b.y + 349, 300, 198, 'ENEMY MODEL', ROWS.pl_model, 33)
+    Card(dl, 'p1', b.x + 177, b.y + 86, 300, 210, 'ENEMY', ROWS.pl_enemy, 30)
+    Card(dl, 'p2', b.x + 177, b.y + 322, 300, 240, 'ENEMY MODEL', ROWS.pl_model, 30)
 
     -- панель превью
     local x1, y1, x2, y2 = b.x + 490, b.y + 68, b.x + 736, b.y + 561
@@ -1324,7 +1408,7 @@ PAGES.players = function(dl, b)
         dl:AddCircle(V(cx, fy), 20 + 50 * k, C(102, 124, 246, 140 * (1 - k)), 40, 1.5)
     end
 
-    Figure(dl, cx, fy, s, O.pl_model_player or 3, O.pl_model_glow)
+    Figure(dl, cx, fy, s, math.min(5, O.pl_model_player or 3), O.pl_model_glow)
 
     if enabled then
         local bx1, by1, bx2, by2 = cx - 62 * s, fy - 306 * s, cx + 62 * s, fy + 8 * s
@@ -2309,7 +2393,7 @@ VIS.LINKS = { { 8, 5 }, { 5, 4 }, { 4, 3 }, { 3, 2 }, { 5, 22 }, { 22, 23 }, { 2
 VIS.BONE_IDS = { 2, 3, 4, 5, 8, 22, 23, 24, 25, 32, 33, 34, 35, 41, 42, 43, 44, 51, 52, 53, 54 }
 
 -- ---------- цвета (O[key_rgb] = 0xRRGGBBAA) ----------
-VIS.RB = { esp_box_vis = 1, esp_box_hid = 1, esp_skel = 2, esp_skel_hid = 2, chm_vis = 4, chm_hid = 4, chm_local_c = 4,
+VIS.RB = { esp_box_vis = 1, esp_box_hid = 1, esp_skel = 2, esp_skel_hid = 2, chm_vis = 4, chm_hid = 4, chm_local_c = 4, chm_team_c = 4, chm_shot = 4,
     trc_local = 8, trc_enemies = 8, xh_c = 16, pl_model_glow = 32, chm_sil = 64, esp_snap_c = 128, sky_top = 256, sky_bot = 256 }
 function VIS.rainbow(off, a)
     local h = (os.clock() * (O.rb_speed or 6) * 0.05 + (off or 0)) % 1
@@ -2469,26 +2553,62 @@ function VIS.pedMaterials(ped, fn)
 end
 if jit then jit.off(VIS.pedMaterials, true) end
 
-function VIS.chamsColor(mode, rgb, now)
-    local br = (O.chm_bright or 100) / 100
-    local r, g, b, a = rgb[1] * br, rgb[2] * br, rgb[3] * br, rgb[4] or 255
+-- s = { mode, c, c2, tex, light, br, alpha, spd }
+function VIS.chGet(set)
+    local id = set.id
+    return { mode = O[set.mk] or 0, c = VIS.rgb(set.ck), c2 = VIS.rgb(id .. '_c2'), tex = O[id .. '_tex'] or 1,
+             light = O[id .. '_light'] or 1, br = (O[id .. '_br'] or 100) / 100, alpha = O[id .. '_alpha'] or 255,
+             spd = (O[id .. '_spd'] or 6) / 6 }
+end
+function VIS.lerpc(a, b, k) return a[1] + (b[1] - a[1]) * k, a[2] + (b[2] - a[2]) * k, a[3] + (b[3] - a[3]) * k end
+function VIS.chamsColor(s, now, mi, mn, hp)
+    local mode, c, c2 = s.mode, s.c, s.c2
+    local t = now * s.spd
+    local r, g, b = c[1], c[2], c[3]
+    local a = math.min(c[4] or 255, s.alpha)
+    local fr = mn > 1 and mi / (mn - 1) or 0
     if mode == 2 then r, g, b = r * 1.35, g * 1.35, b * 1.35
     elseif mode == 3 then
-        local k = now * 2.2
-        r = (128 + 127 * math.sin(k)) * br; g = (128 + 127 * math.sin(k + 2.09)) * br; b = (128 + 127 * math.sin(k + 4.19)) * br
+        local k = t * 2.2 + mi * 0.6
+        r = 128 + 127 * math.sin(k); g = 128 + 127 * math.sin(k + 2.09); b = 128 + 127 * math.sin(k + 4.19)
     elseif mode == 4 then a = math.min(a, 110)
     elseif mode == 5 then
-        local p = 0.55 + 0.45 * math.sin(now * 5)
+        local p = 0.55 + 0.45 * math.sin(t * 5)
         r, g, b = r * p + 90 * (1 - p), g * p + 90 * (1 - p), b * p + 90 * (1 - p)
+    elseif mode == 6 then r, g, b = VIS.lerpc(c, c2, 0.5 + 0.5 * math.sin(t * 4))
+    elseif mode == 7 then local q = VIS.rainbow(mi * 0.08 + t * 0.1); r, g, b = q[1], q[2], q[3]
+    elseif mode == 8 then r, g, b = VIS.lerpc(c, c2, fr)
+    elseif mode == 9 then if math.floor(t * 8) % 2 == 0 then r, g, b = c2[1], c2[2], c2[3] end
+    elseif mode == 10 then local p = 0.75 + 0.5 * math.max(0, math.sin(t * 2 + mi)); r, g, b = r * p, g * p, b * p
+    elseif mode == 11 then a = math.min(a, 50 + 40 * math.sin(t * 3))
+    elseif mode == 12 then
+        local k = 0.5 + 0.5 * math.sin(t * 1.5 + fr * 3)
+        if k < 0.5 then r, g, b = 255 * k * 2, 40 * k, 0 else r, g, b = 255, 40 + 215 * (k - 0.5) * 2, 120 * (k - 0.5) * 2 end
+    elseif mode == 13 then local k = clamp((hp or 100) / 100, 0, 1); r, g, b = 255 * math.min(1, 2 * (1 - k)), 255 * math.min(1, 2 * k), 60
+    elseif mode == 14 then if mi % 2 == 1 then r, g, b = c2[1], c2[2], c2[3] end
+    elseif mode == 15 then r, g, b = VIS.lerpc(c, c2, 0.5 + 0.5 * math.sin(t * 3 + fr * 6.28))
+    elseif mode == 16 then
+        local k = 0.5 + 0.5 * math.sin(t * 9 + mi * 1.3) * math.sin(t * 5.3)
+        r, g, b = 255, 60 + 170 * k, 20 * k
+    elseif mode == 17 then local k = 0.5 + 0.5 * math.sin(t * 2 + mi); r, g, b = 140 + 80 * k, 210 + 45 * k, 255; a = math.min(a, 200)
+    elseif mode == 18 then
+        local k = 0.5 + 0.5 * math.sin(t * 1.2 + mi * 0.9)
+        r, g, b = 60 + 120 * k, 20 + 40 * (1 - k), 140 + 115 * k
+    elseif mode == 19 then local k = 0.5 + 0.5 * math.sin(t * 6 + mi); r, g, b = 90 + 60 * k, 255, 40 + 40 * k
     end
-    return math.floor(clamp(r, 0, 255)), math.floor(clamp(g, 0, 255)), math.floor(clamp(b, 0, 255)), math.floor(a)
+    local br = s.br
+    return math.floor(clamp(r * br, 0, 255)), math.floor(clamp(g * br, 0, 255)), math.floor(clamp(b * br, 0, 255)), math.floor(clamp(a, 0, 255))
 end
-function VIS.paintPed(ped, mode, rgb, now)
+VIS.LIGHTS = { false, { 2.5, 0, 1 }, { 6, 0, 0 }, { 0.25, 0, 0.35 }, { 10, 1, 1 } }
+VIS.matN = {}
+function VIS.paintPed(ped, s, now, hp)
     local ch = VIS.ch
-    local cr, cg, cb, ca
-    if mode > 0 then cr, cg, cb, ca = VIS.chamsColor(mode, rgb, now) end
-    local notex, light = (O.chm_tex or 0) == 1 and mode ~= 4, O.chm_light or 0
-    return VIS.pedMaterials(ped, function(g, mat)
+    local mode = s and s.mode or 0
+    local notex = mode > 0 and s.tex == 1 and mode ~= 4 and mode ~= 11
+    local lt = mode > 0 and VIS.LIGHTS[(s.light or 0) + 1] or false
+    if mode == 10 and not lt then lt = { 1.5, 1, 1 } end
+    local mi, mn = 0, VIS.matN[ped] or 8
+    local n = VIS.pedMaterials(ped, function(g, mat)
         local c = ffi.cast('uint8_t*', mat + 4)
         local tex = ffi.cast('uint32_t*', mat)
         local sp = ffi.cast('float*', mat + 0x0C)
@@ -2504,87 +2624,179 @@ function VIS.paintPed(ped, mode, rgb, now)
             return
         end
         if not ch.orig[mat] then ch.orig[mat] = { c[0], c[1], c[2], c[3], tex = tex[0], a = sp[0], s = sp[1], d = sp[2] } end
-        local o = ch.orig[mat]
-        tex[0] = notex and 0 or o.tex
-        if light == 1 then sp[0], sp[1], sp[2] = 2.5, 0, 1
-        elseif light == 2 then sp[0], sp[1], sp[2] = 6, 0, 0
-        else sp[0], sp[1], sp[2] = o.a, o.s, o.d end
         if not ch.gflag[g] then ch.gflag[g] = ffi.cast('uint32_t*', g + 8)[0] end
+        local o = ch.orig[mat]
         ffi.cast('uint32_t*', g + 8)[0] = bit.bor(ch.gflag[g], 0x40)
-        c[0], c[1], c[2], c[3] = cr, cg, cb, ca
+        c[0], c[1], c[2], c[3] = VIS.chamsColor(s, now, mi, mn, hp)
+        tex[0] = notex and 0 or o.tex
+        if lt then sp[0], sp[1], sp[2] = lt[1], lt[2], lt[3] else sp[0], sp[1], sp[2] = o.a, o.s, o.d end
+        mi = mi + 1
     end)
+    if n and n > 0 then VIS.matN[ped] = n end
+    return n
 end
 function VIS.restoreAll()
     if not VIS.chOk or not VIS.ch.dirty then return end
     TR.T('vis.chams.restore')
     for id = 0, sampGetMaxPlayerId(false) do
         local ok, ped = sampGetCharHandleBySampPlayerId(id)
-        if ok and doesCharExist(ped) then pcall(VIS.paintPed, ped, 0) end
+        if ok and doesCharExist(ped) then pcall(VIS.paintPed, ped, nil) end
     end
-    if doesCharExist(PLAYER_PED) then pcall(VIS.paintPed, PLAYER_PED, 0) end
+    if doesCharExist(PLAYER_PED) then pcall(VIS.paintPed, PLAYER_PED, nil) end
     VIS.ch.orig, VIS.ch.gflag, VIS.ch.dirty, VIS.localPainted = {}, {}, false, false
 end
 function VIS.chamsTick(ready, now)
-    local mP, mW, mS = O.pl_model_player or 0, O.pl_model_behind_walls or 0, O.pl_model_on_shot or 0
-    local mL = O.chm_local or 0
-    local want = ready and ((O.pl_enemy_enabled and (mP + mW + mS) > 0) or mL > 0)
+    local sV, sH, sS = VIS.chGet(VIS.SUB_CH_VIS), VIS.chGet(VIS.SUB_CH_HID), VIS.chGet(VIS.SUB_CH_SHOT)
+    local sT, sL = VIS.chGet(VIS.SUB_CH_TEAM), VIS.chGet(VIS.SUB_CH_LOC)
+    local want = ready and ((O.pl_enemy_enabled and (sV.mode + sH.mode + sS.mode + sT.mode) > 0) or sL.mode > 0)
     if not want then VIS.restoreAll(); return end
-    if now - VIS.ch.last < 0.04 or not VIS.chInit() then return end
+    if now - VIS.ch.last < 0.03 or not VIS.chInit() then return end
     VIS.ch.last = now
     TR.T('vis.chams')
-    if mL > 0 then
+    if sL.mode > 0 then
         VIS.ch.dirty, VIS.localPainted = true, true
-        pcall(VIS.paintPed, PLAYER_PED, mL, VIS.rgb('chm_local_c'), now)
+        pcall(VIS.paintPed, PLAYER_PED, sL, now, getCharHealth(PLAYER_PED))
     elseif VIS.localPainted then
         VIS.localPainted = false
-        pcall(VIS.paintPed, PLAYER_PED, 0)
+        pcall(VIS.paintPed, PLAYER_PED, nil)
     end
     if not O.pl_enemy_enabled then return end
     local myModel = getCharModel(PLAYER_PED)
     for _, e in ipairs(VIS.list) do
         if doesCharExist(e.ped) then
-            local mode, rgb = mP, VIS.rgb('chm_vis')
-            if not e.vis then mode, rgb = (mW > 0 and mW or mP), VIS.rgb('chm_hid') end
-            if mS > 0 and VIS.shot[e.id] and now - VIS.shot[e.id] < 0.3 then mode, rgb = mS, VIS.rgb('chm_shot') end
-            if not O.chm_same and mL == 0 and getCharModel(e.ped) == myModel then mode = 0 end
-            if mode > 0 then VIS.ch.dirty = true end
-            pcall(VIS.paintPed, e.ped, mode, rgb, now)
+            local s = sV
+            if not e.vis and sH.mode > 0 then s = sH end
+            if e.team then s = sT end
+            if sS.mode > 0 and VIS.shot[e.id] and now - VIS.shot[e.id] < 0.3 then s = sS end
+            if s.mode > 0 and not O.chm_same and sL.mode == 0 and getCharModel(e.ped) == myModel then s = nil end
+            if s and s.mode > 0 then VIS.ch.dirty = true else s = nil end
+            pcall(VIS.paintPed, e.ped, s, now, e.hp or sampGetPlayerHealth(e.id))
         end
     end
 end
 function VIS.diag()
     local ok = VIS.chInit()
-    chat('chams init: ' .. tostring(ok) .. ', врагов в списке: ' .. #VIS.list)
+    chat('chams init: ' .. tostring(ok) .. ', игроков в списке: ' .. #VIS.list .. ', timecycle: ' .. tostring(VIS.tcState))
     local e = VIS.list[1]
     if not e then chat('рядом нет игроков (включи Игроки -> Включено)'); return end
     local okm, n = pcall(VIS.pedMaterials, e.ped)
-    chat(('id %d: материалов %s, скин %d (твой %d)'):format(e.id, tostring(okm and n or n), getCharModel(e.ped), getCharModel(PLAYER_PED)))
+    chat(('id %d: материалов %s, скин %d (твой %d)'):format(e.id, tostring(n), getCharModel(e.ped), getCharModel(PLAYER_PED)))
 end
 
--- ---------- силуэт через стены (2D-чамсы по костям) ----------
+-- ---------- оверлей-чамсы сквозь стены (2D по костям) ----------
 VIS.SIL_LINKS = { { 8, 5, 0.9 }, { 5, 3, 1.5 }, { 3, 2, 1.5 }, { 22, 23, 0.75 }, { 23, 24, 0.65 }, { 32, 33, 0.75 }, { 33, 34, 0.65 },
     { 41, 42, 0.95 }, { 42, 43, 0.8 }, { 51, 52, 0.95 }, { 52, 53, 0.8 }, { 5, 22, 0.8 }, { 5, 32, 0.8 }, { 2, 41, 0.9 }, { 2, 51, 0.9 } }
 function VIS.drawSil(dl, e)
+    if e.dist > (O.chm_sil_max or 300) then return end
     local b = e.bones
+    local st = O.chm_sil_style or 0
     local base = (e.y2 - e.y1) * 0.075 * (O.chm_sil_w or 100) / 100
-    local c = VIS.rgb('chm_sil')
+    local c, c2 = VIS.rgb('chm_sil'), VIS.rgb('chm_sil_c2')
+    local cm = O.chm_sil_cm or 0
+    if cm == 1 then local k = (e.hp or 100) / 100; c = { 255 * math.min(1, 2 * (1 - k)), 255 * math.min(1, 2 * k), 70, c[4] }
+    elseif cm == 2 then c = { e.r, e.g, e.b, c[4] } end
     local a = c[4] or 150
-    local passes = O.chm_sil_glow and { { 2.2, 0.18 }, { 1.5, 0.3 }, { 1, 1 } } or { { 1, 1 } }
-    for _, ps in ipairs(passes) do
-        local col = C(c[1], c[2], c[3], a * ps[2])
+    local t = os.clock() * (O.chm_sil_spd or 6) / 6
+    local ytop, ybot = e.y1, e.y2
+    local function colAt(y, mul)
+        if st == 5 then
+            local k = clamp((y - ytop) / math.max(1, ybot - ytop), 0, 1)
+            return C(c[1] + (c2[1] - c[1]) * k, c[2] + (c2[2] - c[2]) * k, c[3] + (c2[3] - c[3]) * k, a * mul)
+        elseif st == 8 then
+            local k = clamp((y - ytop) / math.max(1, ybot - ytop), 0, 1)
+            local f = 0.5 + 0.5 * math.sin(t * 9 + y * 0.15)
+            return C(255, 80 + 150 * k * f, 30 * k, a * mul * (0.6 + 0.4 * f))
+        elseif st == 4 then
+            return C(c[1], c[2], c[3], a * mul * (0.35 + 0.65 * (0.5 + 0.5 * math.sin(t * 5))))
+        end
+        return C(c[1], c[2], c[3], a * mul)
+    end
+    local function bodyPass(wm, mul, joints)
         for _, ln in ipairs(VIS.SIL_LINKS) do
             local p, q = b[ln[1]], b[ln[2]]
             if p and q then
-                local w = base * ln[3] * ps[1]
+                local w = base * ln[3] * wm
+                local col = colAt((p[2] + q[2]) * 0.5, mul)
                 dl:AddLine(V(p[1], p[2]), V(q[1], q[2]), col, w)
-                dl:AddCircleFilled(V(q[1], q[2]), w * 0.5, col, 12)
+                if joints then dl:AddCircleFilled(V(q[1], q[2]), w * 0.5, col, 12) end
             end
         end
         local s1, s2, h1, h2 = b[22], b[32], b[51], b[41]
-        if s1 and s2 and h1 and h2 and ps[2] == 1 then
-            dl:AddQuadFilled(V(s1[1], s1[2]), V(s2[1], s2[2]), V(h2[1], h2[2]), V(h1[1], h1[2]), col)
+        if s1 and s2 and h1 and h2 and wm <= 1 then
+            dl:AddQuadFilled(V(s1[1], s1[2]), V(s2[1], s2[2]), V(h2[1], h2[2]), V(h1[1], h1[2]), colAt((s1[2] + h1[2]) * 0.5, mul))
         end
-        if b[8] then dl:AddCircleFilled(V(b[8][1], b[8][2]), base * 1.05 * ps[1], col, 20) end
+        if b[8] then dl:AddCircleFilled(V(b[8][1], b[8][2]), base * 1.05 * wm, colAt(b[8][2], mul), 20) end
+    end
+    if O.chm_sil_glow or st == 1 then
+        local n = st == 1 and 6 or 3
+        for i = n, 1, -1 do bodyPass(1 + i * 0.45, 0.07 + 0.03 * (n - i), true) end
+    end
+    if st == 1 then return end
+    if st == 2 then
+        bodyPass(1.25, 1, true)
+        local dark = C(10, 12, 20, a * 0.85)
+        for _, ln in ipairs(VIS.SIL_LINKS) do
+            local p, q = b[ln[1]], b[ln[2]]
+            if p and q then
+                dl:AddLine(V(p[1], p[2]), V(q[1], q[2]), dark, base * ln[3] * 0.8)
+                dl:AddCircleFilled(V(q[1], q[2]), base * ln[3] * 0.4, dark, 12)
+            end
+        end
+        if b[8] then dl:AddCircleFilled(V(b[8][1], b[8][2]), base * 0.8, dark, 20) end
+        return
+    end
+    if st == 3 then
+        bodyPass(1, 0.35, true)
+        for y = ytop, ybot, 3 do
+            local k = (y + t * 40) % 6 < 3 and 1 or 0.3
+            dl:AddLine(V(e.x1, y), V(e.x2, y), C(c[1], c[2], c[3], a * 0.08 * k), 1)
+        end
+        return
+    end
+    if st == 6 then
+        for _, ln in ipairs(VIS.SIL_LINKS) do
+            local p, q = b[ln[1]], b[ln[2]]
+            if p and q then
+                for k = 0, 1, 0.2 do
+                    local x, y = p[1] + (q[1] - p[1]) * k, p[2] + (q[2] - p[2]) * k
+                    dl:AddCircleFilled(V(x, y), base * 0.35 * (0.7 + 0.3 * math.sin(t * 6 + k * 8)), colAt(y, 1), 8)
+                end
+            end
+        end
+        return
+    end
+    if st == 7 then
+        for _, ln in ipairs(VIS.SIL_LINKS) do
+            local p, q = b[ln[1]], b[ln[2]]
+            if p and q then
+                dl:AddLine(V(p[1], p[2]), V(q[1], q[2]), C(c2[1], c2[2], c2[3], a), base * 0.55)
+                dl:AddLine(V(p[1], p[2]), V(q[1], q[2]), C(c[1], c[2], c[3], a), base * 0.3)
+                dl:AddCircleFilled(V(q[1], q[2]), base * 0.35, C(c2[1], c2[2], c2[3], a), 10)
+            end
+        end
+        if b[8] then dl:AddCircle(V(b[8][1], b[8][2]), base, C(c[1], c[2], c[3], a), 20, base * 0.3) end
+        return
+    end
+    bodyPass(1, 1, true)
+end
+
+-- ---------- заморозка CTimeCycle::Update (0x5BBAC0), чтобы игра не перетирала наши цвета ----------
+function VIS.tcFreeze(on)
+    local mem = require 'memory'
+    if on == (VIS.tcState == 'frozen') then return end
+    if on then
+        local pre, first = mem.getuint8(0x5BBABF, true), mem.getuint8(0x5BBAC0, true)
+        if first == 0xC3 or not (pre == 0xCC or pre == 0x90 or pre == 0xC3) then
+            if VIS.tcState ~= 'bad' then chat('небо/туман: адрес CTimeCycle::Update не совпал — версия игры не 1.0 US?') end
+            VIS.tcState = 'bad'
+            return
+        end
+        VIS.tcOrig = first
+        mem.setuint8(0x5BBAC0, 0xC3, true)
+        VIS.tcState = 'frozen'
+    else
+        if VIS.tcOrig then mem.setuint8(0x5BBAC0, VIS.tcOrig, true) end
+        VIS.tcState = 'normal'
     end
 end
 
@@ -2600,6 +2812,9 @@ function VIS.tcF(addr, c, alpha, mul)
     if alpha then p[3] = c[4] or 255 end
 end
 function VIS.timecycTick()
+    local need = O.fog_on or O.sky_on or O.sun_on or O.cl_on or O.amb_on or O.flt_on or O.wat_on or O.shd_on
+    VIS.tcFreeze(need and true or false)
+    if not need or VIS.tcState ~= 'frozen' then return end
     if O.fog_on then
         ffi.cast('float*', 0xB7C4F0)[0] = O.fog_far or 900
         ffi.cast('float*', 0xB7C4F4)[0] = math.min(O.fog_start or 250, (O.fog_far or 900) - 10)
@@ -2914,12 +3129,189 @@ function VIS.collectWorld(now, cx, cy, cz)
     VIS.act = act
 end
 
+-- ---------- BACKTRACK: призрак повторяет путь врага с задержкой; выстрел по призраку = урон по врагу ----------
+VIS.bt, VIS.ghosts = {}, {}
+VIS.BT_PTS = { 8, 5, 3, 2, 22, 23, 24, 32, 33, 34, 41, 42, 43, 51, 52, 53 }
+function VIS.btRecord(now)
+    if not O.bt_on then VIS.bt = {}; return end
+    local keep = (O.bt_time or 400) / 1000 + 0.15
+    local myId = RG.myId()
+    local seen = {}
+    for id = 0, sampGetMaxPlayerId(false) do
+        if id ~= myId and sampIsPlayerConnected(id) then
+            local ok, ped = sampGetCharHandleBySampPlayerId(id)
+            if ok and doesCharExist(ped) and not isCharDead(ped) then
+                seen[id] = true
+                local h = VIS.bt[id]
+                if not h then h = { recs = {}, last = 0 }; VIS.bt[id] = h end
+                if now - h.last >= 0.03 then
+                    h.last = now
+                    local x, y, z = getCharCoordinates(ped)
+                    local rec = { t = now, x = x, y = y, z = z, b = {} }
+                    local okp, ptr = pcall(getCharPointer, ped)
+                    if okp and ptr and ptr ~= 0 then
+                        for _, bid in ipairs(VIS.BT_PTS) do
+                            local okb, bx, by, bz = pcall(VIS.bone, ptr, bid)
+                            if okb and math.abs(bx - x) < 3 and math.abs(by - y) < 3 and math.abs(bz - z) < 3 then
+                                rec.b[bid] = { bx, by, bz }
+                            end
+                        end
+                    end
+                    local r = h.recs
+                    r[#r + 1] = rec
+                    while #r > 0 and now - r[1].t > keep do table.remove(r, 1) end
+                end
+            end
+        end
+    end
+    for id in pairs(VIS.bt) do if not seen[id] then VIS.bt[id] = nil end end
+end
+-- запись «призрака»: та, что была bt_time назад
+function VIS.btGhost(h, now)
+    local target = now - (O.bt_time or 400) / 1000
+    local best, bd = nil, 1e9
+    for _, r in ipairs(h.recs) do
+        local d = math.abs(r.t - target)
+        if d < bd then best, bd = r, d end
+    end
+    return best
+end
+function VIS.btProject(now)
+    local gs = {}
+    if O.bt_on and VIS.ready then
+        for id, h in pairs(VIS.bt) do
+            local g = VIS.btGhost(h, now)
+            local cur = h.recs[#h.recs]
+            if g and cur and ((g.x - cur.x) ^ 2 + (g.y - cur.y) ^ 2 + (g.z - cur.z) ^ 2) > 0.04 then
+                local e = { id = id, bones = {} }
+                for bid, p in pairs(g.b) do
+                    local sx, sy = VIS.proj(p[1], p[2], p[3])
+                    e.bones[bid] = sx and { sx, sy } or false
+                end
+                local hx, hy = VIS.proj(g.x, g.y, g.z + 0.95)
+                local fx, fy = VIS.proj(g.x, g.y, g.z - 1.0)
+                if hx and fx then
+                    local hh = math.max(fy - hy, 8)
+                    e.x1, e.y1, e.x2, e.y2 = (hx + fx) * 0.5 - hh * 0.21, hy, (hx + fx) * 0.5 + hh * 0.21, fy
+                end
+                if O.bt_trail then
+                    local tr = {}
+                    for _, r in ipairs(h.recs) do
+                        if r.t <= now and r.t >= g.t then
+                            local sx, sy = VIS.proj(r.x, r.y, r.z - 0.9)
+                            tr[#tr + 1] = sx and { sx, sy } or false
+                        end
+                    end
+                    e.trail = tr
+                end
+                gs[#gs + 1] = e
+            end
+        end
+    end
+    VIS.ghosts = gs
+end
+-- расстояние от точки до луча
+function VIS.rayDist0(ox, oy, oz, dx, dy, dz, px, py, pz)
+    local vx, vy, vz = px - ox, py - oy, pz - oz
+    local t = vx * dx + vy * dy + vz * dz
+    if t < 0.5 then return 1e9, t end
+    local cx, cy, cz = ox + dx * t - px, oy + dy * t - py, oz + dz * t - pz
+    return math.sqrt(cx * cx + cy * cy + cz * cz), t
+end
+VIS.rayDist = VIS.rayDist0
+function VIS.btShot(data)
+    if not O.bt_on or not spawnedAt then return end
+    if data.targetType == 1 then return end             -- уже попали в живого игрока (или сработал тихий аим)
+    local w = getCurrentCharWeapon(PLAYER_PED)
+    local dmg = RG.DMG[w]
+    if not dmg then return end
+    local ox, oy, oz, dx, dy, dz = RG.cam()
+    if data.origin and data.target then      -- реальная линия выстрела (прицел в 3-м лице смещён от центра)
+        local vx, vy, vz = data.target.x - data.origin.x, data.target.y - data.origin.y, data.target.z - data.origin.z
+        local n = math.sqrt(vx * vx + vy * vy + vz * vz)
+        if n > 0.1 then ox, oy, oz, dx, dy, dz = data.origin.x, data.origin.y, data.origin.z, vx / n, vy / n, vz / n end
+    end
+    local rad = O.bt_radius or 0.55
+    local now = os.clock()
+    local best, bestT, bestHead = nil, 1e9, false
+    for id, h in pairs(VIS.bt) do
+        local recs = (O.bt_mode or 0) == 1 and h.recs or { VIS.btGhost(h, now) }
+        for _, r in ipairs(recs) do
+            if r then
+                local pts = { { r.x, r.y, r.z, false }, { r.x, r.y, r.z + 0.45, false }, { r.x, r.y, r.z - 0.5, false } }
+                if r.b[8] then pts[#pts + 1] = { r.b[8][1], r.b[8][2], r.b[8][3], true } else pts[#pts + 1] = { r.x, r.y, r.z + 0.7, true } end
+                for _, p in ipairs(pts) do
+                    local d, t = VIS.rayDist(ox, oy, oz, dx, dy, dz, p[1], p[2], p[3])
+                    local lim = p[4] and rad * 0.6 or rad
+                    if d < lim and t < bestT and t < 300 then best, bestT, bestHead = id, t, p[4] end
+                end
+            end
+        end
+    end
+    if not best then return end
+    local ok, ped = sampGetCharHandleBySampPlayerId(best)
+    if not ok or not doesCharExist(ped) then return end
+    local x, y, z = getCharCoordinates(ped)
+    local tz = z + (bestHead and 0.68 or 0.3)
+    data.targetType, data.targetId = 1, best
+    data.target.x, data.target.y, data.target.z = x, y, tz
+    data.center.x, data.center.y, data.center.z = 0, 0, tz - z
+    local bp = bestHead and 9 or 3
+    TR.T('bt.hit ' .. best)
+    if O.bt_damage ~= false then
+        lua_thread.create(function()
+            if not sampIsPlayerConnected(best) then return end
+            sampSendGiveDamage(best, dmg, w, bp)
+            pcall(VIS.hit, best, dmg)
+            if O.m_feat_hit_sound then addOneOffSound(0.0, 0.0, 0.0, 17802) end
+        end)
+    end
+    if bit.band(O.m_feat_log_events or 0, 1) ~= 0 then
+        local okn, nm = pcall(sampGetPlayerNickname, best)
+        chat(('backtrack {3DE07A}%.1f{FFFFFF} -> %s[%d]'):format(dmg, okn and nm or '?', best))
+    end
+end
+function VIS.drawGhosts(dl)
+    local c = VIS.rgb('bt_ghost')
+    local st = O.bt_style or 0
+    for _, e in ipairs(VIS.ghosts) do
+        if e.trail then
+            for i = 1, #e.trail - 1 do
+                local p, q = e.trail[i], e.trail[i + 1]
+                if p and q then dl:AddLine(V(p[1], p[2]), V(q[1], q[2]), VIS.C(c, 70 + 150 * i / #e.trail), 2) end
+            end
+        end
+        if st == 0 then
+            for _, ln in ipairs(VIS.LINKS) do
+                local p, q = e.bones[ln[1]], e.bones[ln[2]]
+                if p and q then
+                    dl:AddLine(V(p[1], p[2]), V(q[1], q[2]), VIS.C(c, 60), 5)
+                    dl:AddLine(V(p[1], p[2]), V(q[1], q[2]), VIS.C(c, 230), 1.6)
+                end
+            end
+            local hb = e.bones[8]
+            if hb and e.y1 then dl:AddCircle(V(hb[1], hb[2]), math.max(3, (e.y2 - e.y1) * 0.065), VIS.C(c, 230), 16, 1.6) end
+        elseif st == 1 and e.y1 then
+            local save = { e.y1, e.y2 }
+            local fake = { bones = e.bones, x1 = e.x1, y1 = e.y1, x2 = e.x2, y2 = e.y2, dist = 0, hp = 100, r = c[1], g = c[2], b = c[3] }
+            local oc = O.chm_sil_rgb
+            O.chm_sil_rgb = c.v or O.chm_sil_rgb
+            pcall(VIS.drawSil, dl, fake)
+            O.chm_sil_rgb = oc
+        elseif st == 2 and e.y1 then
+            dl:AddRect(V(e.x1, e.y1), V(e.x2, e.y2), VIS.C(c, 230), 4, 15, 1.5)
+            dl:AddRectFilled(V(e.x1, e.y1), V(e.x2, e.y2), VIS.C(c, 40), 4)
+        end
+    end
+end
+
 -- ---------- сбор всего (main-поток, каждый кадр) ----------
 function VIS.tick(ready)
     local now = os.clock()
     VIS.sw, VIS.sh = getScreenResolution()
     VIS.ready = ready
     VIS.worldTick(now)
+    if ready then pcall(VIS.btRecord, now) else VIS.bt = {} end
     local cx, cy, cz = getActiveCameraCoordinates()
     local px, py, pz = getActiveCameraPointAt()
     local fx, fy = px - cx, py - cy
@@ -3009,6 +3401,7 @@ function VIS.tick(ready)
         end
     end
     VIS.drawSouls = ds
+    pcall(VIS.btProject, now)
     VIS.active = true
     VIS.chamsTick(ready, now)
 end
@@ -3105,7 +3498,8 @@ function VIS.drawPlayer(dl, e, sw, sh, now)
         local bcm = O.esp_box_cm or 0
         if bcm == 1 then local hk = e.hp / 100; acc = { 255 * math.min(1, 2 * (1 - hk)), 255 * math.min(1, 2 * hk), 70, 255 }
         elseif bcm == 2 then acc = { e.r, e.g, e.b, 255 } end
-        if O.chm_sil and e.bones and ((O.chm_sil_when or 0) == 1 or not vis) then pcall(VIS.drawSil, dl, e) end
+        local sw2 = O.chm_sil_when or 0
+        if O.chm_sil and e.bones and (sw2 == 1 or (sw2 == 0 and not vis) or (sw2 == 2 and vis)) then pcall(VIS.drawSil, dl, e) end
         if O.pl_model_glow then
             local gc = VIS.rgb('pl_model_glow')
             local w, h = x2 - x1, y2 - y1
@@ -3519,6 +3913,7 @@ imgui.OnFrame(function() return VIS.active end, function(self)
             dl:AddCircleFilled(V(p[1], p[2]), 2, C(255, 255, 255, 220 * p[3]), 8)
         end
         pcall(VIS.drawWorld, dl)
+        pcall(VIS.drawGhosts, dl)
         for _, e in ipairs(VIS.list) do pcall(VIS.drawPlayer, dl, e, sw, sh, now) end
         gA = 1
     end
@@ -3558,6 +3953,7 @@ local qsPending, qsBusy = false, false
 function sampev.onSendBulletSync(data)
     TR.T('bulletsync')
     pcall(RG.onBullet, data)
+    pcall(VIS.btShot, data)
     pcall(VIS.ownShot, data)
     if O.aa_enable and O.aa_mode == 4 then aaFlickUntil = os.clock() + (O.aa_flick_ms or 200) / 1000 end
     if O.m_feat_quick_switch and spawnedAt then qsPending = true end
@@ -3757,6 +4153,7 @@ function onScriptTerminate(scr)
     if scr == thisScript() then
         pcall(setAntiAfk, false)
         pcall(VIS.restoreAll)
+        pcall(VIS.tcFreeze, false)
         saveConfig()
         releaseWeaponIcons()
     end
