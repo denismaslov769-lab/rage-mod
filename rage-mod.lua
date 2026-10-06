@@ -20,7 +20,7 @@
 
 script_name('rage-mod')
 script_author('rage-mod')
-script_version('3.8.1')
+script_version('3.9.0')
 
 local imgui    = require 'mimgui'
 local encoding = require 'encoding'
@@ -234,7 +234,8 @@ local RU = {
     ['Reveal Enemies'] = 'Показ врагов', ['Rotate'] = 'Вращение', ['Zoom Out'] = 'Отдаление',
     ['Damage Dealt'] = 'Нанесённый урон', ['Damage Taken'] = 'Полученный урон', ['Purchases'] = 'Покупки',
     ['Deaths'] = 'Смерти', ['Spin'] = 'Крутилка', ['Jitter'] = 'Джиттер', ['Random'] = 'Случайно',
-    ['Backward'] = 'Спиной',
+    ['Backward'] = 'Спиной', ['Backward Flick'] = 'Спиной + флик', ['Flick Time'] = 'Время флика',
+    ['PITCH'] = 'НАКЛОН', ['Down'] = 'Вниз', ['Up'] = 'Вверх',
     -- прочее
     ['Language'] = 'Язык', ['Menu Scale'] = 'Масштаб меню', ['ESP Scale'] = 'Масштаб ESP',
     ['Synchronization'] = 'Синхронизация', ['Global'] = 'Общий', ['Save Config'] = 'Сохранить конфиг',
@@ -409,7 +410,7 @@ end
 -- ============================================================ НАСТРОЙКИ
 local keyNames = { 'Нет', 'Insert', 'Delete', 'Home', 'End', 'F2', 'F3' }
 local keyCodes = { 0, 0x2D, 0x2E, 0x24, 0x23, 0x71, 0x72 }
-local aaModeItems = { 'Spin', 'Jitter', 'Random', 'Backward' }
+local aaModeItems = { 'Spin', 'Jitter', 'Random', 'Backward', 'Backward Flick' }
 
 local WEAPON_SLOTS = { false, 24, 31, 30, 25, 27, 29, 28, 32, 33, 34 }
 local WEAPON_SLOT_NAMES = { 'Global' }
@@ -453,10 +454,16 @@ local SUB_YAW = { title = 'YAW', rows = CARD('aa', {
     SEL('Mode', aaModeItems, 0, 'aa_mode'),
     SL('Spin Speed', 1, 60, 25, '%d', false, 'aa_speed'),
     SL('Jitter Range', 0, 180, 90, '%d°', false, 'aa_jitter'),
+    SL('Flick Time', 50, 500, 200, '%d ms', false, 'aa_flick_ms'),
     T_('Show Locally', true, 'aa_local'),
     T_('Force Sync', false, 'aa_force'),
     T_('Disable While Aiming', true, 'aa_noaim'),
     SEL('Toggle Key', keyNames, 0, 'aa_key'),
+}) }
+
+-- Pitch: наклон головы, который видят другие (подмена направления камеры в AimSync)
+local SUB_PITCH = { title = 'PITCH', rows = CARD('aap', {
+    SEL('Pitch', { 'Off', 'Down', 'Up' }, 1, 'aa_pitch'),
 }) }
 
 -- Bunny Hop: Direction = Velocity — прыжки по инерции (куда летел), Mouse — туда, куда смотрит камера/мышка
@@ -490,7 +497,7 @@ local ROWS = {
         T_('Enabled', false, 'aa_enable'),
         T_('Suppress Breathing Animations', true),
         SEL('Leg Movement', { 'Default', 'Walking', 'Sliding' }, 1),
-        CH('Pitch'), CH('Yaw', SUB_YAW), CH('Mouse Override'),
+        CH('Pitch', SUB_PITCH), CH('Yaw', SUB_YAW), CH('Mouse Override'),
     }),
     legit_main = CARD('legit_main', { WPN('Weapon'), T_('Enabled') }),
     legit_aim = CARD('legit_aim', {
@@ -1321,6 +1328,14 @@ end)
 
 -- ============================================================ ANTI-AIM (крутилка)
 local aaFlip, aaSign = false, 1
+local aaFlickUntil = 0      -- «Backward Flick»: до этого момента показываем настоящий поворот (стреляем)
+
+-- стреляем прямо сейчас? (ЛКМ с огнестрелом) — для флика без задержки, ещё до пакета пули
+local function aaShooting()
+    if not isKeyDown(0x01) or sampIsChatInputActive() or sampIsDialogActive() then return false end
+    return getCurrentCharWeapon(PLAYER_PED) >= 22
+end
+local function aaFlicking() return os.clock() < aaFlickUntil or aaShooting() end
 
 -- ничего не делаем, пока игрок не заспавнен и не прошло 5 секунд после спавна
 -- (подмена синка / движения / памяти во время коннекта и спавна палится античитом)
@@ -1347,7 +1362,11 @@ local function aaYaw(base)
     elseif m == 1 then
         aaFlip = not aaFlip
         return (base + 180 + (aaFlip and O.aa_jitter or -O.aa_jitter)) % 360
-    elseif m == 2 then return math.random(0, 359) end
+    elseif m == 2 then return math.random(0, 359)
+    elseif m == 4 then
+        -- спиной; в момент выстрела — резко лицом (настоящий поворот), через Flick Time — обратно
+        if aaFlicking() then return base end
+    end
     return (base + 180) % 360
 end
 
@@ -1370,6 +1389,20 @@ function sampev.onSendPlayerSync(data)
     q[1] = 0
     q[2] = 0
     q[3] = aaSign * math.sin(h / 2)
+end
+
+-- Pitch: другие видят голову, опущенную вниз (Down) или задранную вверх (Up).
+-- В момент флика/выстрела AimSync не трогаем — выстрел выглядит честным.
+function sampev.onSendAimSync(data)
+    if not aaActive() or (O.aa_pitch or 0) == 0 then return end
+    if O.aa_mode == 4 and aaFlicking() then return end
+    local pitch = math.rad(O.aa_pitch == 1 and -89 or 89)
+    local yaw = math.rad(aaYaw(getCharHeading(PLAYER_PED)))
+    local c = math.cos(pitch)
+    data.camFront.x = -math.sin(yaw) * c
+    data.camFront.y = math.cos(yaw) * c
+    data.camFront.z = math.sin(pitch)
+    data.aimZ = pitch
 end
 
 -- ---------- настоящая крутилка у себя («Show Locally») на бегу и в прыжке ----------
@@ -1659,6 +1692,7 @@ local QS_WEAPONS = { [24] = true, [25] = true, [27] = false, [33] = true, [34] =
 local qsPending, qsBusy = false, false
 
 function sampev.onSendBulletSync()
+    if O.aa_enable and O.aa_mode == 4 then aaFlickUntil = os.clock() + (O.aa_flick_ms or 200) / 1000 end
     if O.m_feat_quick_switch and spawnedAt then qsPending = true end
 end
 
