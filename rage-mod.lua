@@ -20,7 +20,7 @@
 
 script_name('rage-mod')
 script_author('rage-mod')
-script_version('4.8.20')
+script_version('4.8.21')
 
 local imgui    = require 'mimgui'
 local encoding = require 'encoding'
@@ -264,7 +264,8 @@ local RU = {
     ['Show Position'] = 'Показывать точку', ['Through Walls'] = 'Сквозь стены',
     ['Engine Shot (real)'] = 'Выстрел движком (настоящий)', ['Scripted Jump'] = 'Свой прыжок', ['Packet (fake)'] = 'Пакетом (фейк)',
     ['Rapid Fire'] = 'Рапид фаер в прыжке', ['Auto +C'] = 'Авто +C', ['AUTO +C'] = 'АВТО +C',
-    ['C Delay'] = 'Задержка C', ['Stand Up'] = 'Вставать обратно', ['Stand Delay'] = 'Задержка подъёма',
+    ['C Delay'] = 'Задержка C', ['Fast +C (pro)'] = 'Фаст +C (как у профи)', ['Classic'] = 'Классический',
+    ['Re-press Fire'] = 'Перенажимать огонь', ['Stand Up'] = 'Вставать обратно', ['Stand Delay'] = 'Задержка подъёма',
     ['Only When Aiming'] = 'Только при прицеливании', ['Weapons'] = 'Оружие',
     ['Jump Power'] = 'Сила прыжка', ['Rate Source'] = 'Темп стрельбы', ['Game (mods)'] = 'Как в игре (с модами)',
     ['Script'] = 'Скрипт (ползунок)', ['Own Jump'] = 'Свой прыжок с оружием',
@@ -1089,9 +1090,11 @@ VIS.SUB_JA = { title = 'JUMP ATTACK', rows = CARD('ja', {
 VIS.SUB_PC = { title = 'AUTO +C', rows = CARD('pc', {
     T_('Enabled', false, 'pc_on'),
     MUL('Weapons', { 'Deagle', 'Shotgun', 'Country Rifle', 'Sniper', 'M4 / AK' }, 0x01, 'pc_wpn'),
-    SL('C Delay', 0, 200, 40, '%d ms', false, 'pc_delay'),
-    T_('Stand Up', true, 'pc_stand'),
-    SL('Stand Delay', 20, 300, 80, '%d ms', false, 'pc_stand_ms'),
+    SEL('Mode', { 'Fast +C (pro)', 'Classic' }, 0, 'pc_mode'),
+    SL('C Delay', 0, 200, 0, '%d ms', false, 'pc_delay2'),
+    T_('Re-press Fire', true, 'pc_refire'),
+    T_('Stand Up', false, 'pc_stand2'),
+    SL('Stand Delay', 20, 300, 60, '%d ms', false, 'pc_stand_ms'),
     T_('Only When Aiming', true, 'pc_aim'),
 }) }
 local ROWS = {
@@ -2601,6 +2604,8 @@ function RG.onBullet(data)
     if silent and not tt and hc > 0 and math.random(100) > hc then return end
     -- триггер (в т.ч. «наперёд» — цель ещё за углом) приоритетнее: он уже решил, в кого стрелять
     local t = tt or RG.find(w, false, RG.originOf(data))
+    RG.lastSilent = ('сайлент=%s цель=%s триггер/прыжок=%s'):format(tostring(silent), t and t.id or 'нет', tt and tt.id or '-')
+    RG.lastSilentT = os.clock()
     TR.E(('silent on=%s tt=%s t=%s mb=%s'):format(tostring(silent), tt and tt.id or '-', t and t.id or '-', tostring(O.mb_on)))
     if not t then
         -- сайлент цель не нашёл (например, все за стеной) — пробуем Magic Bullet
@@ -2998,6 +3003,7 @@ function RG.jaTick(free)
     local click = src ~= 1 and isKeyDown(0x01)
     local trig = src ~= 0 and O.tb_on and now - RG.tb.fireT < 0.05
     if not click and not trig then return end
+    if ja.busy and now - ja.lastT < 0.5 then return end
     -- оружие должно быть готово (не перезарядка, есть патроны, таймер игры прошёл)
     if method == 0 and not RG.jaGameReady() then return end
     -- Rapid Fire выключен — обычный темп оружия (как на земле, по анимации); включён — так быстро, как даёт таймер оружия
@@ -3030,41 +3036,107 @@ function RG.jaTick(free)
     end
     ja.lastT = now
     pcall(RG.jaAnim, w)
-    pcall(sampForceOnfootSync)
-    pcall(sampForceAimSync)
-    if method == 0 then
-        -- настоящий выстрел движком; подмену пули в цель и урон сделает onBullet (как у сайлента)
-        ja.t = t
-        local ok, r, why = pcall(RG.jaEngineFire, w, d.origin.x, d.origin.y, d.origin.z, d.target.x, d.target.y, d.target.z, t and t.ped)
-        TR.E('ja.engine ok=' .. tostring(ok) .. ' r=' .. tostring(r) .. ' ' .. tostring(why))
-        if not ok and not ja.warned then ja.warned = true; chat('Jump Attack: ошибка выстрела движком: ' .. tostring(r)) end
-        if ok and r then RG.qp.shotT = now end
-        return
-    end
-    local okb, eb = pcall(RG.jaSendBullet, d)
-    if not okb then
-        TR.E('ja.err ' .. tostring(eb))
-        if not ja.warned then ja.warned = true; chat('Jump Attack: не удалось отправить выстрел (нужен SAMPFUNCS)') end
-        return
-    end
-    if O.ja_ammo then pcall(setCharAmmo, PLAYER_PED, w, ammo - 1) end
-    RG.qp.shotT = now
-    pcall(VIS.ownShot, d)
-    TR.E('ja.shot ' .. tostring(d.targetId))
-    if t then
-        local id, bp = t.id, t.bp
-        if bit.band(O.m_feat_log_events or 0, 1) ~= 0 then
-            local okn, nm = pcall(sampGetPlayerNickname, id)
-            chat(('jump {3DE07A}%.1f{FFFFFF} -> %s[%d]'):format(dmg, okn and nm or '?', id))
+    -- ВСЁ, что синхронно вызывает наши же sampev-хуки (force sync, Fire движка, отправка пакета),
+    -- делаем из отдельного lua_thread, а не из main-корутины: иначе MoonLoader при вызове хука
+    -- пытается возобновить уже работающую корутину -> «cannot resume non-suspended coroutine» и скрипт умирает
+    ja.busy = true
+    local ox, oy, oz, tx, ty, tz = d.origin.x, d.origin.y, d.origin.z, d.target.x, d.target.y, d.target.z
+    RG.jaRun(function()
+        pcall(sampForceOnfootSync)
+        pcall(sampForceAimSync)
+        if method == 0 then
+            -- настоящий выстрел движком; подмену пули в цель и урон сделает onBullet (как у сайлента)
+            ja.t, ja.lastT = t, os.clock()
+            local ok, r, why = pcall(RG.jaEngineFire, w, ox, oy, oz, tx, ty, tz, t and t.ped)
+            TR.E('ja.engine ok=' .. tostring(ok) .. ' r=' .. tostring(r) .. ' ' .. tostring(why))
+            if not ok and not ja.warned then ja.warned = true; chat('Jump Attack: ошибка выстрела движком: ' .. tostring(r)) end
+            if ok and r then RG.qp.shotT = os.clock() end
+            ja.busy = false
+            return
         end
-        lua_thread.create(function()
-            wait(0)
+        local okb, eb = pcall(RG.jaSendBullet, d)
+        ja.busy = false
+        if not okb then
+            TR.E('ja.err ' .. tostring(eb))
+            if not ja.warned then ja.warned = true; chat('Jump Attack: не удалось отправить выстрел (нужен SAMPFUNCS)') end
+            return
+        end
+        if O.ja_ammo then pcall(setCharAmmo, PLAYER_PED, w, ammo - 1) end
+        RG.qp.shotT = os.clock()
+        pcall(VIS.ownShot, d)
+        TR.E('ja.shot ' .. tostring(d.targetId))
+        if t then
+            local id, bp = t.id, t.bp
+            if bit.band(O.m_feat_log_events or 0, 1) ~= 0 then
+                local okn, nm = pcall(sampGetPlayerNickname, id)
+                chat(('jump {3DE07A}%.1f{FFFFFF} -> %s[%d]'):format(dmg, okn and nm or '?', id))
+            end
             if not sampIsPlayerConnected(id) then return end
             pcall(sampForceOnfootSync)
             sampSendGiveDamage(id, dmg, w, bp)
-            if RG.on() and O.rage_other_double_tap then wait(60); sampSendGiveDamage(id, dmg, w, bp) end
+            if RG.on() and O.rage_other_double_tap then
+                lua_thread.create(function() wait(60); sampSendGiveDamage(id, dmg, w, bp) end)
+            end
+        end
+    end)
+end
+
+-- очередь задач Jump Attack: выполняются в отдельном lua_thread (после wait — когда main-корутина на паузе)
+RG.jaJobs = {}
+function RG.jaRun(fn)
+    RG.jaJobs[#RG.jaJobs + 1] = fn
+    if not RG.jaW or RG.jaW.dead then
+        RG.jaW = lua_thread.create(function()
+            while true do
+                wait(0)
+                local j = table.remove(RG.jaJobs, 1)
+                while j do
+                    local ok, e = pcall(j)
+                    if not ok then TR.E('ja.job.err ' .. tostring(e)); RG.ja.busy = false end
+                    j = table.remove(RG.jaJobs, 1)
+                end
+            end
         end)
     end
+end
+
+-- /ragemd_silent — диагностика сайлента прямо в чат
+function RG.diag()
+    local w = getCurrentCharWeapon(PLAYER_PED)
+    chat(('silent: v%s | Рейдж=%s Тихий аим=%s | оружие %d (урон %s) | FOV %.0f | сквозь стены=%s | хитбоксы 0x%X | MB=%s'):format(
+        thisScript().version, tostring(RG.on()), tostring(O.rage_main_silent_aim), w, tostring(RG.DMG[w]),
+        O.rage_main_field_of_view or 180, tostring(O.rage_main_aim_through_walls), O.rage_sel_hitboxes or 7, tostring(O.mb_on)))
+    local cx, cy, cz, fx, fy, fz = RG.cam()
+    local orgs = RG.origins()
+    local myId = RG.myId()
+    local n, nf, nv = 0, 0, 0
+    for id = 0, sampGetMaxPlayerId(false) do
+        if id ~= myId and sampIsPlayerConnected(id) then
+            local ok, ped = sampGetCharHandleBySampPlayerId(id)
+            if ok and doesCharExist(ped) and not isCharDead(ped) then
+                n = n + 1
+                local x, y, z = getCharCoordinates(ped)
+                local dx, dy, dz = x - cx, y - cy, z + 0.35 - cz
+                local dist = math.sqrt(dx * dx + dy * dy + dz * dz)
+                local ang = math.deg(math.acos(math.max(-1, math.min(1, (dx * fx + dy * fy + dz * fz) / dist))))
+                if ang <= (O.rage_main_field_of_view or 180) then nf = nf + 1 end
+                local vis = RG.visAny(orgs, x, y, z + 0.35)
+                if vis then nv = nv + 1 end
+                if n <= 4 then
+                    chat(('  id %d: %.0fм угол %.0f° видим=%s пауза=%s hp=%d'):format(id, dist, ang, tostring(vis),
+                        tostring(sampIsPlayerPaused(id)), sampGetPlayerHealth(id)))
+                end
+            end
+        end
+    end
+    chat(('  игроков рядом %d, в FOV %d, видимых %d, точек обзора %d'):format(n, nf, nv, #orgs))
+    if RG.lastSilentT then
+        chat(('  последний выстрел (%.1f с назад): %s'):format(os.clock() - RG.lastSilentT, RG.lastSilent))
+    else
+        chat('  выстрелов через сайлент ещё не было (хук пули не срабатывал)')
+    end
+    local t = RG.find(w, false)
+    chat('  сейчас RG.find -> ' .. (t and ('id ' .. t.id) or 'нет цели'))
 end
 
 -- ---------- AUTO +C ----------
@@ -3079,8 +3151,40 @@ function RG.pcShot()
     if O.pc_aim and not isKeyDown(0x02) then return end
     RG.pc.pending = true
 end
+-- Фаст +C: покадровая машина состояний в main-цикле (без lua_thread и wait — без лишних кадров).
+-- выстрел -> [задержка] -> C нажат 1 кадр (+ огонь отпущен на 1 кадр, чтобы зажатая ЛКМ сразу дала
+-- следующий выстрел) -> стреляешь из приседа -> следующий C поднимает. Ритм: выстрел-C-выстрел-C.
+function RG.pcFast(free)
+    local pc = RG.pc
+    local now = os.clock()
+    if pc.pending then
+        pc.pending = false
+        pc.stage, pc.t = 1, now
+    end
+    if not pc.stage then return end
+    if not free then pc.stage = nil; return end
+    if pc.stage == 1 then
+        if (now - pc.t) * 1000 < (O.pc_delay2 or 0) then return end
+        setGameKeyState(18, 255)                               -- C
+        if O.pc_refire ~= false then setGameKeyState(17, 0) end
+        TR.E('pc.c')
+        pc.stage = 2
+    elseif pc.stage == 2 then
+        setGameKeyState(18, 0)
+        if O.pc_refire ~= false then setGameKeyState(17, 0) end
+        pc.stage, pc.t = (O.pc_stand2 and 3 or nil), now
+    elseif pc.stage == 3 then
+        if (now - pc.t) * 1000 < (O.pc_stand_ms or 60) then return end
+        if isCharDucking(PLAYER_PED) then setGameKeyState(18, 255); TR.E('pc.stand') end
+        pc.stage = 4
+    elseif pc.stage == 4 then
+        setGameKeyState(18, 0)
+        pc.stage = nil
+    end
+end
 function RG.pcTick(free)
     local pc = RG.pc
+    if (O.pc_mode or 0) == 0 then return RG.pcFast(free) end
     if not pc.pending then return end
     pc.pending = false
     if pc.busy or not free then return end
@@ -3090,10 +3194,10 @@ function RG.pcTick(free)
             for _ = 1, 2 do setGameKeyState(18, 255); wait(0) end
             setGameKeyState(18, 0); wait(0)
         end
-        wait(O.pc_delay or 40)
+        wait(O.pc_delay2 or 0)
         TR.E('pc.crouch')
         tap()
-        if O.pc_stand ~= false then
+        if O.pc_stand2 then
             wait(O.pc_stand_ms or 80)
             if isCharDucking(PLAYER_PED) then TR.E('pc.stand'); tap() end
         end
@@ -5045,6 +5149,7 @@ function main()
     loadConfig()
     sampRegisterChatCommand('ragemd', toggleMenu)
     sampRegisterChatCommand('ragemd_chams', function() pcall(VIS.diag) end)
+    sampRegisterChatCommand('ragemd_silent', function() local ok, e = pcall(RG.diag); if not ok then chat('diag err: ' .. tostring(e)) end end)
     sampRegisterChatCommand('ragemd_update', function()
         checkUpdate(true, function(v)
             if v then chat('скачана {3DE07A}v' .. v .. '{FFFFFF} — включится после перезапуска игры (или Ctrl+R)') end
