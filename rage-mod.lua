@@ -20,7 +20,7 @@
 
 script_name('rage-mod')
 script_author('rage-mod')
-script_version('4.8.9')
+script_version('4.8.10')
 
 local imgui    = require 'mimgui'
 local encoding = require 'encoding'
@@ -1076,7 +1076,7 @@ VIS.SUB_JA = { title = 'JUMP ATTACK', rows = CARD('ja', {
     SEL('Method', { 'Engine Shot (real)', 'Scripted Jump', 'Packet (fake)' }, 0, 'ja_method2'),
     SL('Jump Power', 3, 9, 5.5, '%.1f', true, 'ja_power'),
     SEL('Fire From', { 'On Click', 'With Trigger Bot', 'Click or Trigger' }, 2, 'ja_src'),
-    T_('Need Target', true, 'ja_need'),
+    T_('Need Target', false, 'ja_need2'),
     SEL('Rate Source', { 'Game (mods)', 'Script' }, 0, 'ja_rsrc'),
     SL('Fire Rate', 50, 200, 100, '%d%%', false, 'ja_rate'),
     T_('Own Jump', true, 'ja_ownjump'),
@@ -2976,7 +2976,7 @@ function RG.jaTick(free)
         end
     end
     if not t and RG.on() then t = RG.find(w, false) end
-    if not t and O.ja_need then return end
+    if not t and O.ja_need2 then return end      -- по умолчанию стреляем и без цели — просто в прицел
     local x, y, z = getCharCoordinates(PLAYER_PED)
     local d = { origin = { x = x, y = y, z = z + 0.55 }, weaponId = w, targetId = 65535, targetType = 0 }
     if t then
