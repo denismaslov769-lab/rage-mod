@@ -20,7 +20,7 @@
 
 script_name('rage-mod')
 script_author('rage-mod')
-script_version('4.6.2')
+script_version('4.6.3')
 
 local imgui    = require 'mimgui'
 local encoding = require 'encoding'
@@ -2012,16 +2012,6 @@ local function bhopDir(I)
     return -math.sin(h), math.cos(h)
 end
 
--- Bunny Hop без подтормаживания: isCharInAir становится false уже ПОСЛЕ касания земли — к этому
--- моменту игра гасит скорость и включает анимацию приземления (FALL_land / JUMP_land), отсюда «торможение».
--- Поэтому прыгаем заранее: когда до земли осталось меньше, чем пролетим за ~2 кадра.
-function VIS.bhLanding(x, y, z, vz)
-    if vz > -0.5 then return false end
-    local gz = getGroundZFor3dCoord(x, y, z)
-    if not gz or gz < -90 then return false end
-    return (z - gz - 1.0) < (-vz) * 0.034 + 0.12   -- центр педа ~1.0 м над ступнями
-end
-
 local function mvAir(I, speed)
     local vx, vy, vz = getCharVelocity(PLAYER_PED)
     local hs = math.sqrt(vx * vx + vy * vy)
@@ -2066,22 +2056,6 @@ local function aaMoveTick(free, I)
     local vx, vy, vz = getCharVelocity(PLAYER_PED)
     local inAir = isCharInAir(PLAYER_PED)
 
-    -- Bunny Hop: прыжок ещё в воздухе, за мгновение до земли — без потери скорости
-    if O.m_move_bunny_hop and I.jump and inAir and now - mvJumpT > 0.2 and VIS.bhLanding(x, y, z, vz) then
-        mvJumpT = now
-        local ex, ey = bhopDir(I)
-        if ex then
-            setCharVelocity(PLAYER_PED, ex * O.bhop_speed, ey * O.bhop_speed, AA_JUMP_VZ)
-        elseif I.moving then
-            local s = math.max(speed, math.sqrt(vx * vx + vy * vy))
-            setCharVelocity(PLAYER_PED, dx * s, dy * s, AA_JUMP_VZ)
-        else
-            setCharVelocity(PLAYER_PED, vx, vy, AA_JUMP_VZ)
-        end
-        aaPos = nil
-        aaJumpHeld = I.jump
-        return
-    end
     -- прыжок по нажатию; с Bunny Hop — и при зажатой клавише (прыгает сразу при приземлении)
     if I.jump and (not aaJumpHeld or O.m_move_bunny_hop) and not inAir and now - mvJumpT > 0.3 then
         local s = speed
@@ -2096,10 +2070,7 @@ local function aaMoveTick(free, I)
     aaJumpHeld = I.jump
     -- первые кадры прыжка игра может гасить вертикальную скорость — дожимаем, пока не оторвались
     if not inAir and now - mvJumpT < 0.15 then
-        -- не режем скорость банни-хопа до скорости бега
-        local hx, hy = vx, vy
-        if hx * hx + hy * hy < speed * speed then hx, hy = dx * speed, dy * speed end
-        setCharVelocity(PLAYER_PED, hx, hy, AA_JUMP_VZ)
+        setCharVelocity(PLAYER_PED, dx * speed, dy * speed, AA_JUMP_VZ)
         aaPos = nil
         return
     end
@@ -2206,24 +2177,14 @@ local function mvTick(free, I)
     -- Bunny Hop: держишь прыжок — прыгаем в момент приземления, сохраняя скорость полёта
     -- с банни-хопом прыжок делает скрипт (игровой прыжок блокируем, чтобы не мешал)
     if O.m_move_bunny_hop then setGameKeyState(BTN_JUMP, 0) end
-    -- прыжок ещё в воздухе, за мгновение до касания (без кадра на земле и анимации приземления)
-    local preLand = O.m_move_bunny_hop and I.jump and inAir and not water and now - mvJumpT > 0.2
-        and VIS.bhLanding(x, y, z, vz)
-    if preLand or (O.m_move_bunny_hop and I.jump and (mv.wasAir or not mv.jumpHeld) and not inAir and not water and now - mvJumpT > 0.2) then
+    if O.m_move_bunny_hop and I.jump and (mv.wasAir or not mv.jumpHeld) and not inAir and not water and now - mvJumpT > 0.2 then
         local ex, ey = bhopDir(I)
         if ex then
             mv.airVx, mv.airVy = ex * O.bhop_speed, ey * O.bhop_speed
-        elseif preLand or not mv.wasAir then
-            mv.airVx, mv.airVy = vx, vy       -- по инерции — с текущей скоростью полёта / бега
+        elseif not mv.wasAir then
+            mv.airVx, mv.airVy = vx, vy       -- первый прыжок по инерции — с текущей скоростью бега
         end
-        if preLand then
-            mvJumpT = now
-            setCharVelocity(PLAYER_PED, mv.airVx, mv.airVy, AA_JUMP_VZ)
-        else
-            mvDoJump(mv.airVx, mv.airVy)
-        end
-        mv.wasAir, mv.prevMoving, mv.jumpHeld = true, I.moving, I.jump
-        return
+        mvDoJump(mv.airVx, mv.airVy)
     elseif not inAir and now - mvJumpT < 0.15 then
         setCharVelocity(PLAYER_PED, mv.airVx, mv.airVy, AA_JUMP_VZ)
     end
