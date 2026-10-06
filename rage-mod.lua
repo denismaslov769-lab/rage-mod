@@ -20,7 +20,7 @@
 
 script_name('rage-mod')
 script_author('rage-mod')
-script_version('4.8.13')
+script_version('4.8.14')
 
 local imgui    = require 'mimgui'
 local encoding = require 'encoding'
@@ -3001,6 +3001,7 @@ function RG.jaTick(free)
     local click = src ~= 1 and isKeyDown(0x01)
     local trig = src ~= 0 and O.tb_on and now - RG.tb.fireT < 0.05
     if not click and not trig then return end
+    if ja.busy and now - ja.lastT < 0.5 then return end
     -- оружие должно быть готово (не перезарядка, есть патроны, таймер игры прошёл)
     if method == 0 and not RG.jaGameReady() then return end
     -- Rapid Fire выключен — обычный темп оружия (как на земле, по анимации); включён — так быстро, как даёт таймер оружия
@@ -3033,39 +3034,66 @@ function RG.jaTick(free)
     end
     ja.lastT = now
     pcall(RG.jaAnim, w)
-    pcall(sampForceOnfootSync)
-    pcall(sampForceAimSync)
-    if method == 0 then
-        -- настоящий выстрел движком; подмену пули в цель и урон сделает onBullet (как у сайлента)
-        ja.t = t
-        local ok, r, why = pcall(RG.jaEngineFire, w, d.origin.x, d.origin.y, d.origin.z, d.target.x, d.target.y, d.target.z, t and t.ped)
-        TR.E('ja.engine ok=' .. tostring(ok) .. ' r=' .. tostring(r) .. ' ' .. tostring(why))
-        if not ok and not ja.warned then ja.warned = true; chat('Jump Attack: ошибка выстрела движком: ' .. tostring(r)) end
-        if ok and r then RG.qp.shotT = now end
-        return
-    end
-    local okb, eb = pcall(RG.jaSendBullet, d)
-    if not okb then
-        TR.E('ja.err ' .. tostring(eb))
-        if not ja.warned then ja.warned = true; chat('Jump Attack: не удалось отправить выстрел (нужен SAMPFUNCS)') end
-        return
-    end
-    if O.ja_ammo then pcall(setCharAmmo, PLAYER_PED, w, ammo - 1) end
-    RG.qp.shotT = now
-    pcall(VIS.ownShot, d)
-    TR.E('ja.shot ' .. tostring(d.targetId))
-    if t then
-        local id, bp = t.id, t.bp
-        if bit.band(O.m_feat_log_events or 0, 1) ~= 0 then
-            local okn, nm = pcall(sampGetPlayerNickname, id)
-            chat(('jump {3DE07A}%.1f{FFFFFF} -> %s[%d]'):format(dmg, okn and nm or '?', id))
+    -- ВСЁ, что синхронно вызывает наши же sampev-хуки (force sync, Fire движка, отправка пакета),
+    -- делаем из отдельного lua_thread, а не из main-корутины: иначе MoonLoader при вызове хука
+    -- пытается возобновить уже работающую корутину -> «cannot resume non-suspended coroutine» и скрипт умирает
+    ja.busy = true
+    local ox, oy, oz, tx, ty, tz = d.origin.x, d.origin.y, d.origin.z, d.target.x, d.target.y, d.target.z
+    RG.jaRun(function()
+        pcall(sampForceOnfootSync)
+        pcall(sampForceAimSync)
+        if method == 0 then
+            -- настоящий выстрел движком; подмену пули в цель и урон сделает onBullet (как у сайлента)
+            ja.t, ja.lastT = t, os.clock()
+            local ok, r, why = pcall(RG.jaEngineFire, w, ox, oy, oz, tx, ty, tz, t and t.ped)
+            TR.E('ja.engine ok=' .. tostring(ok) .. ' r=' .. tostring(r) .. ' ' .. tostring(why))
+            if not ok and not ja.warned then ja.warned = true; chat('Jump Attack: ошибка выстрела движком: ' .. tostring(r)) end
+            if ok and r then RG.qp.shotT = os.clock() end
+            ja.busy = false
+            return
         end
-        lua_thread.create(function()
-            wait(0)
+        local okb, eb = pcall(RG.jaSendBullet, d)
+        ja.busy = false
+        if not okb then
+            TR.E('ja.err ' .. tostring(eb))
+            if not ja.warned then ja.warned = true; chat('Jump Attack: не удалось отправить выстрел (нужен SAMPFUNCS)') end
+            return
+        end
+        if O.ja_ammo then pcall(setCharAmmo, PLAYER_PED, w, ammo - 1) end
+        RG.qp.shotT = os.clock()
+        pcall(VIS.ownShot, d)
+        TR.E('ja.shot ' .. tostring(d.targetId))
+        if t then
+            local id, bp = t.id, t.bp
+            if bit.band(O.m_feat_log_events or 0, 1) ~= 0 then
+                local okn, nm = pcall(sampGetPlayerNickname, id)
+                chat(('jump {3DE07A}%.1f{FFFFFF} -> %s[%d]'):format(dmg, okn and nm or '?', id))
+            end
             if not sampIsPlayerConnected(id) then return end
             pcall(sampForceOnfootSync)
             sampSendGiveDamage(id, dmg, w, bp)
-            if RG.on() and O.rage_other_double_tap then wait(60); sampSendGiveDamage(id, dmg, w, bp) end
+            if RG.on() and O.rage_other_double_tap then
+                lua_thread.create(function() wait(60); sampSendGiveDamage(id, dmg, w, bp) end)
+            end
+        end
+    end)
+end
+
+-- очередь задач Jump Attack: выполняются в отдельном lua_thread (после wait — когда main-корутина на паузе)
+RG.jaJobs = {}
+function RG.jaRun(fn)
+    RG.jaJobs[#RG.jaJobs + 1] = fn
+    if not RG.jaW or RG.jaW.dead then
+        RG.jaW = lua_thread.create(function()
+            while true do
+                wait(0)
+                local j = table.remove(RG.jaJobs, 1)
+                while j do
+                    local ok, e = pcall(j)
+                    if not ok then TR.E('ja.job.err ' .. tostring(e)); RG.ja.busy = false end
+                    j = table.remove(RG.jaJobs, 1)
+                end
+            end
         end)
     end
 end
