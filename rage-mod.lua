@@ -20,7 +20,7 @@
 
 script_name('rage-mod')
 script_author('rage-mod')
-script_version('4.8.17')
+script_version('4.8.18')
 
 local imgui    = require 'mimgui'
 local encoding = require 'encoding'
@@ -1077,7 +1077,7 @@ VIS.SUB_QP = { title = 'QUICK PEEK ASSIST', rows = CARD('qp', {
 -- Jump Attack: в прыжке игра стрелять не даёт — выстрел (bullet sync + урон) отправляет скрипт
 VIS.SUB_JA = { title = 'JUMP ATTACK', rows = CARD('ja', {
     T_('Enabled', false, 'ja_on'),
-    SEL('Method', { 'Standing Spoof (real)', 'Scripted Jump', 'Packet (fake)' }, 0, 'ja_method3'),
+    SEL('Method', { 'Standing Spoof (real)', 'Scripted Jump', 'Packet (old)' }, 2, 'ja_method4'),
     SL('Jump Power', 3, 9, 5.5, '%.1f', true, 'ja_power'),
     SEL('Fire From', { 'On Click', 'With Trigger Bot', 'Click or Trigger' }, 2, 'ja_src'),
     T_('Need Target', false, 'ja_need2'),
@@ -2852,7 +2852,7 @@ end
 RG.JA_RATE = { [22] = 0.25, [23] = 0.4, [24] = 0.8, [25] = 1.0, [26] = 0.3, [27] = 0.35, [28] = 0.07, [29] = 0.09,
                [30] = 0.11, [31] = 0.11, [32] = 0.07, [33] = 1.0, [34] = 1.2, [38] = 0.03 }
 RG.ja = { lastT = 0, sending = false, warned = false }
-function RG.jaWindow() return O.ja_on and (O.ja_method3 or 0) == 2 and os.clock() - RG.ja.lastT < 0.25 end
+function RG.jaWindow() return O.ja_on and (O.ja_method4 or 2) == 2 and os.clock() - RG.ja.lastT < 0.25 end
 -- цель выстрела Jump Attack (для подмены пули в onBullet)
 function RG.jaShotTarget()
     local ja = RG.ja
@@ -2989,7 +2989,7 @@ end
 function RG.jaTick(free)
     local ja = RG.ja
     if not O.ja_on or not free or not spawnedAt or os.clock() - spawnedAt < 5 then return end
-    local method = O.ja_method3 or 0
+    local method = O.ja_method4 or 2
     if method == 1 then return RG.jaJumpTick(free, true) end
     if method == 0 then return RG.jaSpoofTick(free) end
     -- движок отказывается стрелять из задачи игрового прыжка (поэтому без бхопа/аир-стрейфа не работало):
