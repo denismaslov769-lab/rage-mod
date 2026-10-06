@@ -20,7 +20,7 @@
 
 script_name('rage-mod')
 script_author('rage-mod')
-script_version('4.8.11')
+script_version('4.8.12')
 
 local imgui    = require 'mimgui'
 local encoding = require 'encoding'
@@ -263,6 +263,9 @@ local RU = {
     ['Run Back'] = 'Бегом', ['Teleport'] = 'Телепорт', ['Return Speed'] = 'Скорость возврата',
     ['Show Position'] = 'Показывать точку', ['Through Walls'] = 'Сквозь стены',
     ['Engine Shot (real)'] = 'Выстрел движком (настоящий)', ['Scripted Jump'] = 'Свой прыжок', ['Packet (fake)'] = 'Пакетом (фейк)',
+    ['Rapid Fire'] = 'Рапид фаер в прыжке', ['Auto +C'] = 'Авто +C', ['AUTO +C'] = 'АВТО +C',
+    ['C Delay'] = 'Задержка C', ['Stand Up'] = 'Вставать обратно', ['Stand Delay'] = 'Задержка подъёма',
+    ['Only When Aiming'] = 'Только при прицеливании', ['Weapons'] = 'Оружие',
     ['Jump Power'] = 'Сила прыжка', ['Rate Source'] = 'Темп стрельбы', ['Game (mods)'] = 'Как в игре (с модами)',
     ['Script'] = 'Скрипт (ползунок)', ['Own Jump'] = 'Свой прыжок с оружием',
     ['Jump Attack'] = 'Стрельба в прыжке', ['JUMP ATTACK'] = 'СТРЕЛЬБА В ПРЫЖКЕ', ['Fire From'] = 'Чем стрелять',
@@ -1077,10 +1080,19 @@ VIS.SUB_JA = { title = 'JUMP ATTACK', rows = CARD('ja', {
     SL('Jump Power', 3, 9, 5.5, '%.1f', true, 'ja_power'),
     SEL('Fire From', { 'On Click', 'With Trigger Bot', 'Click or Trigger' }, 2, 'ja_src'),
     T_('Need Target', false, 'ja_need2'),
-    SEL('Rate Source', { 'Game (mods)', 'Script' }, 0, 'ja_rsrc'),
+    T_('Rapid Fire', false, 'ja_rapid'),
     SL('Fire Rate', 50, 200, 100, '%d%%', false, 'ja_rate'),
     T_('Own Jump', true, 'ja_ownjump'),
     T_('Use Ammo', true, 'ja_ammo'),
+}) }
+-- Auto +C: после выстрела сам жмёт C (присед) — сбивает анимацию отдачи, и сразу встаёт обратно
+VIS.SUB_PC = { title = 'AUTO +C', rows = CARD('pc', {
+    T_('Enabled', false, 'pc_on'),
+    MUL('Weapons', { 'Deagle', 'Shotgun', 'Country Rifle', 'Sniper', 'M4 / AK' }, 0x01, 'pc_wpn'),
+    SL('C Delay', 0, 200, 40, '%d ms', false, 'pc_delay'),
+    T_('Stand Up', true, 'pc_stand'),
+    SL('Stand Delay', 20, 300, 80, '%d ms', false, 'pc_stand_ms'),
+    T_('Only When Aiming', true, 'pc_aim'),
 }) }
 local ROWS = {
     rage_main = CARD('rage_main', {
@@ -1155,7 +1167,7 @@ local ROWS = {
         T_('Strafe Assist'), T_('Edge Jump'), T_('Slow Walk'), T_('Fast Ladder'),
     }),
     m_feat = CARD('m_feat', {
-        T_('Quick Switch'), CH('Jump Attack', VIS.SUB_JA), DIS('Knife Bot'), T_('Prevent AFK Kick'), T_('Hit Sound'),
+        T_('Quick Switch'), CH('Jump Attack', VIS.SUB_JA), CH('Auto +C', VIS.SUB_PC), T_('Prevent AFK Kick'), T_('Hit Sound'),
         DIS('Automatic Purchase'), DIS('Automatic Grenade Release'), DIS('Auto-Accept Matchmaking'),
         MUL('Log Events', { 'Damage Dealt', 'Damage Taken', 'Purchases', 'Deaths' }, 0x00),
     }),
@@ -2883,12 +2895,10 @@ function RG.jaEngineFire(w, ox, oy, oz, tx, ty, tz, tped)
     if tped then local okp, pp = pcall(getCharPointer, tped); if okp and pp and pp ~= 0 then te = pp end end
     -- bool __thiscall CWeapon::Fire(CEntity* owner, CVector* origin, CVector* muzzle, CEntity* target, CVector* targetPos, CVector* driveBy)
     local st0, tm0 = wt[1], wt[4]
-    local gameRate = (O.ja_rsrc or 0) == 0
     local r = callMethod(0x742300, wp, 6, 0, ped, base, base, te, base + 12, 0)
     r = r and bit.band(r, 0xFF) ~= 0
     local st1, clip = wt[1], wt[2]
     if clip > 0 then wt[1] = 0 end                            -- FIRING не оставляем: оружие снова «готово»
-    if not gameRate then wt[4] = tm0 end                       -- темп «Скрипт»: игровой таймер не трогаем
     -- темп «Как в игре»: оставляем таймер, который поставил Fire (его меняют рапид-фаер моды)
     return r, ('fire=%s st %d->%d clip %d'):format(tostring(r), st0, st1, clip)
 end
@@ -2988,9 +2998,10 @@ function RG.jaTick(free)
     local click = src ~= 1 and isKeyDown(0x01)
     local trig = src ~= 0 and O.tb_on and now - RG.tb.fireT < 0.05
     if not click and not trig then return end
-    if method == 0 and (O.ja_rsrc or 0) == 0 then
-        if not RG.jaGameReady() then return end
-    elseif now - ja.lastT < (RG.JA_RATE[w] or 0.3) / ((O.ja_rate or 100) / 100) then return end
+    -- оружие должно быть готово (не перезарядка, есть патроны, таймер игры прошёл)
+    if method == 0 and not RG.jaGameReady() then return end
+    -- Rapid Fire выключен — обычный темп оружия (как на земле, по анимации); включён — так быстро, как даёт таймер оружия
+    if not (method == 0 and O.ja_rapid) and now - ja.lastT < (RG.JA_RATE[w] or 0.3) / ((O.ja_rate or 100) / 100) then return end
     local ammo = getAmmoInCharWeapon(PLAYER_PED, w)
     if (O.ja_ammo or method == 0) and ammo <= 0 then return end
     -- цель: триггер -> сайлент/рейдж -> никакой (пуля в прицел)
@@ -3056,11 +3067,46 @@ function RG.jaTick(free)
     end
 end
 
+-- ---------- AUTO +C ----------
+RG.PC_W = { [24] = 1, [25] = 2, [33] = 4, [34] = 8, [30] = 16, [31] = 16 }
+RG.pc = { pending = false, busy = false }
+function RG.pcShot()
+    if not O.pc_on or not spawnedAt then return end
+    local w = getCurrentCharWeapon(PLAYER_PED)
+    local m = RG.PC_W[w]
+    if not m or bit.band(O.pc_wpn or 1, m) == 0 then return end
+    if not isCharOnFoot(PLAYER_PED) or isCharInAir(PLAYER_PED) then return end
+    if O.pc_aim and not isKeyDown(0x02) then return end
+    RG.pc.pending = true
+end
+function RG.pcTick(free)
+    local pc = RG.pc
+    if not pc.pending then return end
+    pc.pending = false
+    if pc.busy or not free then return end
+    pc.busy = true
+    lua_thread.create(function()
+        local function tap()                                  -- держим C 2 кадра: игра должна увидеть нажатие
+            for _ = 1, 2 do setGameKeyState(18, 255); wait(0) end
+            setGameKeyState(18, 0); wait(0)
+        end
+        wait(O.pc_delay or 40)
+        TR.E('pc.crouch')
+        tap()
+        if O.pc_stand ~= false then
+            wait(O.pc_stand_ms or 80)
+            if isCharDucking(PLAYER_PED) then TR.E('pc.stand'); tap() end
+        end
+        pc.busy = false
+    end)
+end
+
 -- каждый кадр: Trigger Bot / Quick Peek / Jump Attack / Quick Scope / Quick Stop
 function RG.tick(free)
     pcall(RG.qpTick, free)
     local okt, et = pcall(RG.tbTick, free)
     if not okt then TR.E('tb.err ' .. tostring(et)) end
+    pcall(RG.pcTick, free)
     local okj, ej = pcall(RG.jaTick, free)
     if not okj then TR.E('ja.err ' .. tostring(ej)) end
     if not RG.on() or not free or not spawnedAt or os.clock() - spawnedAt < 5 then return end
@@ -4844,6 +4890,7 @@ function sampev.onSendBulletSync(data)
     pcall(VIS.ownShot, data)
     if O.aa_enable and O.aa_mode == 4 then aaFlickUntil = os.clock() + (O.aa_flick_ms or 200) / 1000 end
     if O.m_feat_quick_switch and spawnedAt then qsPending = true end
+    pcall(RG.pcShot)
 end
 
 local function qsTick()
