@@ -9,8 +9,8 @@
     Rage/Legit/ESP/Misc — ТОЛЬКО интерфейс (значения сохраняются в конфиг).
     Anti-Aim (крутилка) — рабочий: Rage -> ANTI-AIM -> Enabled, настройки в «Yaw ›».
     Крутилку видят ДРУГИЕ игроки (подмена поворота в PlayerSync) — и стоя, и на бегу.
-    «Show Locally» крутит и вашего персонажа (тоже на бегу: направление бега берётся из
-    камеры + WASD, поэтому персонаж бежит туда, куда вы жмёте, а не туда, куда смотрит).
+    «Show Locally» крутит и вашего персонажа, когда он стоит. На бегу и в прыжке поворот
+    отдаётся игре (нормальный бег/спринт/прыжок), а другие игроки всё равно видят крутилку.
 
     Шрифты (необязательно): moonloader\resource\rage-mod\SSTMedium.TTF, SSTBold.TTF, fa-solid-900.ttf
     Активация: /ragemd или клавиша (по умолчанию Insert, меняется в меню профиля в тулбаре).
@@ -19,7 +19,7 @@
 
 script_name('rage-mod')
 script_author('rage-mod')
-script_version('3.3.1')
+script_version('3.3.2')
 
 local imgui    = require 'mimgui'
 local encoding = require 'encoding'
@@ -1341,71 +1341,31 @@ function sampev.onSendPlayerSync(data)
     q[3] = aaSign * math.sin(h / 2)
 end
 
-local function camHeading()
-    local cx, cy = getActiveCameraCoordinates()
-    local px, py = getActiveCameraPointAt()
-    return math.deg(math.atan2(-(px - cx), py - cy))
+-- игрок сам двигается / прыгает? (через игровой пад — работает с любыми биндами и геймпадом)
+local BTN_JUMP = 14
+local function aaPlayerMoving(free)
+    if not free then return false end
+    local lx, ly = getPositionOfAnalogueSticks(0)
+    return lx ~= 0 or ly ~= 0
 end
-
--- направление бега из камеры + WASD (nil — клавиши не нажаты)
-local function moveHeading()
-    local f = (isKeyDown(0x57) and 1 or 0) - (isKeyDown(0x53) and 1 or 0)
-    local r = (isKeyDown(0x44) and 1 or 0) - (isKeyDown(0x41) and 1 or 0)
-    if f == 0 and r == 0 then return nil end
-    return (camHeading() + math.deg(math.atan2(-r, f))) % 360
-end
-
--- позиция персонажа напрямую в матрице (только X/Y — высоту оставляем игре: лестницы, склоны, гравитация)
-local function pedMatrix()
-    local ptr = getCharPointer(PLAYER_PED)
-    if not ptr or ptr == 0 then return nil end
-    local m = rd32(ptr + 0x14)
-    if m == 0 then return nil end
-    return ffi.cast('float*', m + 0x30)
-end
-
-local aaPos, aaLast = nil, 0
-local AA_SPEED_WALK, AA_SPEED_RUN, AA_SPEED_SPRINT = 1.8, 5.4, 8.2
-
-local function aaMove(mh)
-    local now = os.clock()
-    local dt = clamp(now - aaLast, 0, 0.1)
-    aaLast = now
-    local x, y, z = getCharCoordinates(PLAYER_PED)
-    -- старт / телепорт / сильный сдвиг игрой — синхронизируемся с реальной позицией
-    if not aaPos or math.abs(aaPos.x - x) + math.abs(aaPos.y - y) > 2.5 then aaPos = { x = x, y = y } end
-    if not mh or isCharInAir(PLAYER_PED) or isCharInWater(PLAYER_PED) then
-        aaPos.x, aaPos.y = x, y
-        return
-    end
-    local speed = isKeyDown(0x20) and AA_SPEED_SPRINT or (isKeyDown(0x12) and AA_SPEED_WALK or AA_SPEED_RUN)
-    local h = math.rad(mh)
-    local dx, dy = -math.sin(h), math.cos(h)
-    local nx, ny = aaPos.x + dx * speed * dt, aaPos.y + dy * speed * dt
-    -- не проходим сквозь стены/машины/объекты (проверка чуть впереди, на уровне пояса)
-    if isLineOfSightClear(aaPos.x, aaPos.y, z, nx + dx * 0.45, ny + dy * 0.45, z, true, true, false, true, false) then
-        aaPos.x, aaPos.y = nx, ny
-    end
-    local p = pedMatrix()
-    if p then
-        p[0], p[1] = aaPos.x, aaPos.y
-    end
-    -- гасим горизонтальную скорость от анимации (она направлена по «крутящемуся» взгляду)
-    local _, _, vz = getCharVelocity(PLAYER_PED)
-    setCharVelocity(PLAYER_PED, dx * speed, dy * speed, vz)
+local function aaPlayerJumping(free)
+    if isCharInAir(PLAYER_PED) or isCharInWater(PLAYER_PED) then return true end
+    return free and isButtonPressed(PLAYER_HANDLE, BTN_JUMP)
 end
 
 local function aaTick(free)
     localSpinning = false
-    if not aaActive() then aaPos = nil; return end
+    if not aaActive() then return end
     if O.aa_local and O.aa_mode == 0 then
-        -- крутим персонажа и при этом двигаем его сами туда, куда нажаты WASD (относительно камеры):
-        -- игра двигает педа по направлению взгляда, поэтому её движение мы заменяем своим
-        setCharHeading(PLAYER_PED, aaSpinAngle())
-        localSpinning = true
-        aaMove(free and moveHeading() or nil)
-    else
-        aaPos = nil
+        -- GTA двигает педа строго по его повороту (root motion анимаций бега/прыжка),
+        -- поэтому крутить реальный heading на бегу/в прыжке нельзя — игра ломает движение.
+        -- На бегу и в прыжке heading отдаём игре (нативный бег, спринт, прыжок, коллизии),
+        -- а крутилку для ДРУГИХ игроков продолжает подменять onSendPlayerSync.
+        -- Стоя на месте — крутим и локально.
+        if not aaPlayerMoving(free) and not aaPlayerJumping(free) then
+            setCharHeading(PLAYER_PED, aaSpinAngle())
+            localSpinning = true
+        end
     end
     -- частая отправка синхронизации, чтобы вращение у других было плавным
     if O.aa_force and os.clock() - lastForce > 0.04 then
