@@ -20,7 +20,7 @@
 
 script_name('rage-mod')
 script_author('rage-mod')
-script_version('3.5.2')
+script_version('3.6.0')
 
 local imgui    = require 'mimgui'
 local encoding = require 'encoding'
@@ -528,8 +528,8 @@ local ROWS = {
         T_('Strafe Assist', true), T_('Edge Jump'), T_('Slow Walk'), T_('Fast Ladder', true),
     }),
     m_feat = CARD('m_feat', {
-        T_('Quick Switch', true), T_('Super Toss'), DIS('Knife Bot'), T_('Prevent AFK Kick', true), T_('Hit Sound', true),
-        T_('Automatic Purchase'), T_('Automatic Grenade Release', true), T_('Auto-Accept Matchmaking', true),
+        T_('Quick Switch', true), DIS('Super Toss'), DIS('Knife Bot'), T_('Prevent AFK Kick', true), T_('Hit Sound', true),
+        DIS('Automatic Purchase'), DIS('Automatic Grenade Release'), DIS('Auto-Accept Matchmaking'),
         MUL('Log Events', { 'Damage Dealt', 'Damage Taken', 'Purchases', 'Deaths' }, 0x03),
     }),
 }
@@ -1368,66 +1368,97 @@ local function pedPos()
     return ffi.cast('float*', m + 0x30)
 end
 
-local function aaMoveTick(free)
+-- ============================================================ MOVEMENT (общие хелперы)
+local AA_SPEED_SLOW = 1.0
+local mvJumpT = 0
+
+-- ввод игрока: стик/WASD относительно камеры, прыжок (пробел или кнопка прыжка), спринт, ходьба
+local function mvInput(free)
+    local lx, ly = getPositionOfAnalogueSticks(0)
+    if not free then lx, ly = 0, 0 end
+    local I = { moving = lx ~= 0 or ly ~= 0, dx = 0, dy = 0, k = 0 }
+    I.jump = free and (isKeyDown(0x20) or isButtonPressed(PLAYER_HANDLE, BTN_JUMP))
+    I.sprint = free and (isButtonPressed(PLAYER_HANDLE, BTN_SPRINT) or isKeyDown(0xA0))
+    I.walk = free and isKeyDown(0x12)
+    if I.moving then
+        local mh = math.rad((camHeading() + math.deg(math.atan2(-lx, -ly))) % 360)
+        I.dx, I.dy = -math.sin(mh), math.cos(mh)
+        I.k = math.min(1, math.sqrt(lx * lx + ly * ly) / 128)
+    end
+    return I
+end
+
+-- прыжок скриптом: приподнимаем педа (снимается флаг «стоит») и даём вертикальную скорость
+local function mvDoJump(vx, vy)
+    mvJumpT = os.clock()
+    local p = pedPos()
+    if p then p[2] = p[2] + 0.15 end
+    setCharVelocity(PLAYER_PED, vx, vy, AA_JUMP_VZ)
+end
+
+-- управление в воздухе: Air Strafe (WASD рулит скоростью) и Strafe Assist (без клавиш — доворот к камере)
+local function mvAir(I, speed)
+    local vx, vy, vz = getCharVelocity(PLAYER_PED)
+    local hs = math.sqrt(vx * vx + vy * vy)
+    if I.moving and O.m_move_air_strafe then
+        local s = math.max(hs, speed)
+        setCharVelocity(PLAYER_PED, I.dx * s, I.dy * s, vz)
+    elseif not I.moving and O.m_move_strafe_assist and hs > 1 then
+        local h = math.rad(camHeading())
+        local cx, cy = -math.sin(h), math.cos(h)
+        local nx, ny = vx + (cx * hs - vx) * 0.08, vy + (cy * hs - vy) * 0.08
+        local n = math.sqrt(nx * nx + ny * ny)
+        if n > 0 then setCharVelocity(PLAYER_PED, nx / n * hs, ny / n * hs, vz) end
+    end
+end
+
+local function aaMoveTick(free, I)
     local now = os.clock()
     local dt = clamp(now - aaLast, 0, 0.1)
     aaLast = now
 
-    -- ввод игрока (читаем ДО обнуления)
-    local lx, ly = getPositionOfAnalogueSticks(0)
-    if not free then lx, ly = 0, 0 end
-    -- прыжок: пробел ИЛИ игровая кнопка прыжка; спринт: игровая кнопка спринта ИЛИ Shift
-    local jumpDown = free and (isKeyDown(0x20) or isButtonPressed(PLAYER_HANDLE, BTN_JUMP))
-    local sprint = free and (isButtonPressed(PLAYER_HANDLE, BTN_SPRINT) or isKeyDown(0xA0))
-    local walk = free and isKeyDown(0x12)
-
-    -- игре движение и прыжок не даём
+    -- игре движение и прыжок не даём (ввод уже прочитан в mvInput)
     setGameKeyState(0, 0)
     setGameKeyState(1, 0)
     setGameKeyState(BTN_JUMP, 0)
 
-    local moving = lx ~= 0 or ly ~= 0
-    local dx, dy, speed = 0, 0, 0
-    if moving then
-        local mh = math.rad((camHeading() + math.deg(math.atan2(-lx, -ly))) % 360)
-        local k = math.min(1, math.sqrt(lx * lx + ly * ly) / 128)
-        speed = (sprint and AA_SPEED_SPRINT or (walk and AA_SPEED_WALK or AA_SPEED_RUN)) * k
-        dx, dy = -math.sin(mh), math.cos(mh)
+    local speed = 0
+    if I.moving then
+        local walkSpeed = O.m_move_slow_walk and AA_SPEED_SLOW or AA_SPEED_WALK
+        speed = (I.sprint and AA_SPEED_SPRINT or (I.walk and walkSpeed or AA_SPEED_RUN)) * I.k
     end
+    local dx, dy = I.dx, I.dy
 
     local x, y, z = getCharCoordinates(PLAYER_PED)
-    local _, _, vz = getCharVelocity(PLAYER_PED)
+    local vx, vy, vz = getCharVelocity(PLAYER_PED)
     local inAir = isCharInAir(PLAYER_PED)
 
-    -- прыжок: по нажатию, только с земли
-    if jumpDown and not aaJumpHeld and not inAir and now - aaJumpT > 0.35 then
-        aaJumpT = now
-        -- чуть приподнимаем педа, чтобы игра сняла флаг «стоит на земле» и не обнулила скорость
-        local p = pedPos()
-        if p then p[2] = p[2] + 0.15 end
-        setCharVelocity(PLAYER_PED, dx * speed, dy * speed, AA_JUMP_VZ)
+    -- прыжок по нажатию; с Bunny Hop — и при зажатой клавише (прыгает сразу при приземлении)
+    if I.jump and (not aaJumpHeld or O.m_move_bunny_hop) and not inAir and now - mvJumpT > 0.3 then
+        local s = speed
+        if O.m_move_bunny_hop then s = math.max(s, math.sqrt(vx * vx + vy * vy)) end
+        mvDoJump(dx * s, dy * s)
         aaPos = nil
-        aaJumpHeld = jumpDown
+        aaJumpHeld = I.jump
         return
     end
-    aaJumpHeld = jumpDown
+    aaJumpHeld = I.jump
     -- первые кадры прыжка игра может гасить вертикальную скорость — дожимаем, пока не оторвались
-    if not inAir and now - aaJumpT < 0.15 then
+    if not inAir and now - mvJumpT < 0.15 then
         setCharVelocity(PLAYER_PED, dx * speed, dy * speed, AA_JUMP_VZ)
         aaPos = nil
         return
     end
 
-    if inAir or now - aaJumpT < 0.15 then
-        -- в воздухе физика работает со скоростью — управляем ей (без ввода сохраняем инерцию)
-        if moving then setCharVelocity(PLAYER_PED, dx * speed, dy * speed, vz) end
+    if inAir then
+        mvAir(I, speed)
         aaPos = nil
         return
     end
 
     -- на земле: двигаем позицию сами
     if not aaPos or math.abs(aaPos.x - x) + math.abs(aaPos.y - y) > 2.5 then aaPos = { x = x, y = y } end
-    if not moving then
+    if not I.moving then
         aaPos.x, aaPos.y = x, y
         return
     end
@@ -1442,13 +1473,13 @@ local function aaMoveTick(free)
     setCharVelocity(PLAYER_PED, dx * speed, dy * speed, vz)
 end
 
-local function aaTick(free)
+local function aaTick(free, I)
     localSpinning = false
-    if not aaActive() then aaPos = nil; return end
+    if not I or not aaActive() then aaPos = nil; return end
     if O.aa_local and O.aa_mode == 0 and not isCharInWater(PLAYER_PED) then
         setCharHeading(PLAYER_PED, aaSpinAngle())
         localSpinning = true
-        aaMoveTick(free)
+        aaMoveTick(free, I)
     else
         aaPos = nil
     end
@@ -1459,40 +1490,164 @@ local function aaTick(free)
     end
 end
 
--- ============================================================ INIT / MAIN
-imgui.OnInitialize(function()
-    local io = imgui.GetIO()
-    io.IniFilename = nil
-    local st = imgui.GetStyle()
-    st.WindowRounding, st.WindowBorderSize = 14, 0
-    st.WindowPadding, st.ItemSpacing = imgui.ImVec2(0, 0), imgui.ImVec2(0, 0)
+-- ============================================================ MISC: MOVEMENT
+local CLIMB_ANIMS = { 'CLIMB_jump', 'CLIMB_jump_B', 'CLIMB_Pull', 'CLIMB_Stand', 'CLIMB_Stand_finish', 'CLIMB_idle', 'CLIMB_jump2fall' }
+local WALK_ANIMS  = { 'WALK_player', 'WALK_armed', 'WALK_civi', 'GUNMOVE_FWD' }
+local mv = { wasAir = false, prevMoving = false, airVx = 0, airVy = 0, stop = nil }
 
-    local glyph = io.Fonts:GetGlyphRangesCyrillic()
-    local res = getWorkingDirectory() .. '\\resource\\rage-mod\\'
-    local sys = getFolderPath(0x14) .. '\\'
-    local function pick(list) for _, p in ipairs(list) do if doesFileExist(p) then return p end end end
-    local medium = pick({ res .. 'SSTMedium.TTF', sys .. 'seguisb.ttf', sys .. 'segoeui.ttf', sys .. 'arial.ttf' })
-    local bold   = pick({ res .. 'SSTBold.TTF', sys .. 'segoeuib.ttf', sys .. 'arialbd.ttf' }) or medium
-    local fa     = pick({ res .. 'fa-solid-900.ttf', getWorkingDirectory() .. '\\resource\\fonts\\fa-solid-900.ttf' })
-
-    local cfg = imgui.ImFontConfig()
-    cfg.OversampleH = 3
-    cfg.PixelSnapH = true
-    io.Fonts:Clear()
-    for i, s in ipairs(SCALES) do
-        local f = {}
-        f.body  = io.Fonts:AddFontFromFileTTF(medium, 15.0 * s, cfg, glyph)
-        f.ctrl  = io.Fonts:AddFontFromFileTTF(medium, 14.0 * s, cfg, glyph)
-        f.small = io.Fonts:AddFontFromFileTTF(medium, 12.0 * s, cfg, glyph)
-        f.cap   = io.Fonts:AddFontFromFileTTF(medium, 10.0 * s, cfg, glyph)
-        f.t9    = io.Fonts:AddFontFromFileTTF(medium, 9.0 * s, cfg, glyph)
-        f.t8    = io.Fonts:AddFontFromFileTTF(medium, 8.0 * s, cfg, glyph)
-        f.title = io.Fonts:AddFontFromFileTTF(bold, 16.0 * s, cfg, glyph)
-        if fa then f.icon = io.Fonts:AddFontFromFileTTF(fa, 13.0 * s, cfg, FA_RANGES) end
-        FS[i] = f
+local function animSpeed(list, k)
+    for _, a in ipairs(list) do
+        if isCharPlayingAnim(PLAYER_PED, a) then setCharAnimSpeed(PLAYER_PED, a, k) end
     end
-    for k, v in pairs(FS[1]) do F[k] = v end
-end)
+end
+
+local function mvTick(free, I)
+    if not I or not isCharOnFoot(PLAYER_PED) then mv.wasAir, mv.stop = false, nil; return end
+    local now = os.clock()
+    local inAir, water = isCharInAir(PLAYER_PED), isCharInWater(PLAYER_PED)
+    local x, y, z = getCharCoordinates(PLAYER_PED)
+    local vx, vy, vz = getCharVelocity(PLAYER_PED)
+    local hs = math.sqrt(vx * vx + vy * vy)
+
+    -- Fast Ladder: ускоряем анимации карабканья
+    if O.m_move_fast_ladder then animSpeed(CLIMB_ANIMS, 2.2) end
+
+    -- Jump Bug: гасим скорость падения прямо перед землёй — без урона от падения
+    if O.m_move_jump_bug and inAir and not water and vz < -9 then
+        local gz = getGroundZFor3dCoord(x, y, z)
+        if z - gz < 1.6 + (-vz) / 30 then setCharVelocity(PLAYER_PED, vx, vy, -2.0) end
+    end
+
+    -- Edge Jump: автопрыжок, когда сходим с края (впереди земля ниже на 1.5+ м)
+    if O.m_move_edge_jump and not inAir and not water and now - mvJumpT > 0.4 then
+        local ex, ey, es
+        if localSpinning then
+            if I.moving then ex, ey, es = I.dx, I.dy, I.sprint and AA_SPEED_SPRINT or AA_SPEED_RUN end
+        elseif hs > 2 then
+            ex, ey, es = vx / hs, vy / hs, hs
+        end
+        if ex then
+            local g0 = getGroundZFor3dCoord(x, y, z)
+            local g1 = getGroundZFor3dCoord(x + ex * 0.8, y + ey * 0.8, z + 0.5)
+            if g0 - g1 > 1.5 then mvDoJump(ex * es, ey * es) end
+        end
+    end
+
+    -- дальше — только для обычного движения (при «Show Locally» бег/прыжок/воздух ведёт aaMoveTick)
+    if localSpinning then mv.wasAir, mv.prevMoving = inAir, I.moving; return end
+
+    -- Bunny Hop: держишь прыжок — прыгаем в момент приземления, сохраняя скорость полёта
+    if O.m_move_bunny_hop and I.jump and mv.wasAir and not inAir and not water and now - mvJumpT > 0.2 then
+        mvDoJump(mv.airVx, mv.airVy)
+    elseif not inAir and now - mvJumpT < 0.15 then
+        setCharVelocity(PLAYER_PED, mv.airVx, mv.airVy, AA_JUMP_VZ)
+    end
+
+    if inAir and not water then
+        mvAir(I, I.sprint and AA_SPEED_SPRINT or AA_SPEED_RUN)
+        local ax, ay = getCharVelocity(PLAYER_PED)
+        mv.airVx, mv.airVy = ax, ay
+    end
+
+    -- Standalone Quick Stop: отпустил клавиши на бегу — мгновенная остановка без «тормозного пути»
+    if O.m_move_standalone_quick_stop and not inAir and not water then
+        if I.moving then
+            mv.stop = nil
+        elseif mv.prevMoving and hs > 2 then
+            mv.stop = { x = x, y = y, t = now }
+        end
+        if mv.stop then
+            if now - mv.stop.t < 0.35 then
+                local p = pedPos()
+                if p then p[0], p[1] = mv.stop.x, mv.stop.y end
+                setCharVelocity(PLAYER_PED, 0, 0, vz)
+            else
+                mv.stop = nil
+            end
+        end
+    end
+
+    -- Slow Walk: с зажатым Alt ходим заметно медленнее
+    if O.m_move_slow_walk and I.walk and I.moving and not inAir then animSpeed(WALK_ANIMS, 0.55) end
+
+    mv.wasAir, mv.prevMoving = inAir, I.moving
+end
+
+-- ============================================================ MISC: FEATURES
+local memory = require 'memory'
+
+-- Prevent AFK Kick: игра не встаёт на паузу при сворачивании (SA-MP не считает вас AFK)
+local afkPatched = false
+local function writeBytes(addr, bytes)
+    for i, b in ipairs(bytes) do memory.setuint8(addr + i - 1, b, true) end
+end
+local function setAntiAfk(on)
+    on = on and true or false
+    if on == afkPatched then return end
+    afkPatched = on
+    if on then
+        writeBytes(0x747FB6, { 0x01 })
+        writeBytes(0x74805A, { 0x01 })
+        writeBytes(0x74542B, { 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90 })
+        writeBytes(0x53EA88, { 0x90, 0x90, 0x90, 0x90, 0x90, 0x90 })
+    else
+        writeBytes(0x747FB6, { 0x00 })
+        writeBytes(0x74805A, { 0x00 })
+        writeBytes(0x74542B, { 0x50, 0x51, 0xFF, 0x15, 0x00, 0x83, 0x85, 0x00 })
+        writeBytes(0x53EA88, { 0x0F, 0x84, 0x7B, 0x01, 0x00, 0x00 })
+    end
+end
+
+-- Quick Switch: после выстрела из медленного оружия — мгновенно на кулак и обратно (сбивает анимацию перезарядки)
+local QS_WEAPONS = { [24] = true, [25] = true, [27] = false, [33] = true, [34] = true }
+local qsPending, qsBusy = false, false
+
+function sampev.onSendBulletSync()
+    if O.m_feat_quick_switch then qsPending = true end
+end
+
+local function qsTick()
+    if not qsPending then return end
+    qsPending = false
+    if qsBusy or not doesCharExist(PLAYER_PED) then return end
+    local w = getCurrentCharWeapon(PLAYER_PED)
+    if not QS_WEAPONS[w] then return end
+    qsBusy = true
+    lua_thread.create(function()
+        wait(30)
+        setCurrentCharWeapon(PLAYER_PED, 0)
+        wait(60)
+        if doesCharExist(PLAYER_PED) then setCurrentCharWeapon(PLAYER_PED, w) end
+        qsBusy = false
+    end)
+end
+
+-- Hit Sound + Log Events
+local function pname(id)
+    local ok, n = pcall(sampGetPlayerNickname, id)
+    return (ok and n or '?') .. '[' .. id .. ']'
+end
+local function logOn(bitv) return bit.band(O.m_feat_log_events or 0, bitv) ~= 0 end
+
+function sampev.onSendGiveDamage(id, dmg, weapon, part)
+    if O.m_feat_hit_sound then addOneOffSound(0.0, 0.0, 0.0, 17802) end
+    if logOn(1) then chat(('урон {3DE07A}%.1f{FFFFFF} -> %s'):format(dmg, pname(id))) end
+end
+
+function sampev.onSendTakeDamage(id, dmg, weapon, part)
+    if logOn(2) then
+        local from = (id == 65535) and 'окружения' or pname(id)
+        chat(('получено {E03D3D}%.1f{FFFFFF} от %s'):format(dmg, from))
+    end
+end
+
+function sampev.onPlayerDeathNotification(killer, killed, reason)
+    if not logOn(8) then return end
+    local ok, my = sampGetPlayerIdByCharHandle(PLAYER_PED)
+    if not ok or (killer ~= my and killed ~= my) then return end
+    local k = killer == 65535 and 'мир' or pname(killer)
+    chat(('{E0B33D}%s{FFFFFF} убил {E0B33D}%s'):format(k, pname(killed)))
+end
 
 -- ============================================================ AUTO-UPDATE (GitHub)
 -- raw.githubusercontent.com/.../main/ кэшируется CDN ~5 минут и отдаёт старую версию,
@@ -1581,7 +1736,11 @@ function main()
             O.aa_enable = not O.aa_enable
             if O.notify then chat('Anti-Aim: ' .. (O.aa_enable and '{3DE07A}ON' or '{E03D3D}OFF')) end
         end
-        aaTick(free)
+        local I = doesCharExist(PLAYER_PED) and mvInput(free) or nil
+        aaTick(free, I)
+        mvTick(free, I)
+        qsTick()
+        setAntiAfk(O.m_feat_prevent_afk_kick)
         if os.clock() - lastIconCheck > 1.5 then
             lastIconCheck = os.clock()
             refreshWeaponIcons(false)
@@ -1591,6 +1750,7 @@ end
 
 function onScriptTerminate(scr)
     if scr == thisScript() then
+        pcall(setAntiAfk, false)
         saveConfig()
         releaseWeaponIcons()
     end
