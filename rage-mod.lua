@@ -20,7 +20,7 @@
 
 script_name('rage-mod')
 script_author('rage-mod')
-script_version('4.5.0')
+script_version('4.5.1')
 
 local imgui    = require 'mimgui'
 local encoding = require 'encoding'
@@ -449,7 +449,7 @@ do
         ['Chams Settings'] = 'Настройки чамсов',
         ['On Shot Color'] = 'Цвет при выстреле',
         ['Brightness'] = 'Яркость',
-        ['Paint Same Skin'] = 'Красить такой же скин',
+        ['Paint Same Skin'] = 'Красить мой скин у врагов (красит и меня)',
         ['Local Player'] = 'Свой персонаж',
         ['Local Color'] = 'Свой цвет',
         ['Line'] = 'Линия',
@@ -843,7 +843,7 @@ VIS.SUB_CH_HID  = VIS.chSet('chh', 'HIDDEN CHAMS', 'pl_model_behind_walls', 5, '
 VIS.SUB_CH_SHOT = VIS.chSet('chs', 'ON SHOT CHAMS', 'pl_model_on_shot', 1, 'chm_shot', { 255, 255, 255 }, { 255, 80, 80 })
 VIS.SUB_CH_TEAM = VIS.chSet('cht', 'TEAMMATE CHAMS', 'chm_team_mode', 0, 'chm_team_c', { 90, 255, 150 }, { 255, 255, 255 })
 VIS.SUB_CH_LOC  = VIS.chSet('chl', 'LOCAL CHAMS', 'chm_local', 0, 'chm_local_c', { 255, 200, 80 }, { 255, 90, 200 })
-table.insert(VIS.SUB_CH_LOC.rows, T_('Paint Same Skin', true, 'chm_same'))
+table.insert(VIS.SUB_CH_LOC.rows, T_('Paint Same Skin', false, 'chm_same'))
 VIS.SUB_CH_OV = { title = 'OVERLAY (THROUGH WALLS)', rows = CARD('chm_ov', {
     COL('Enabled', true, { 255, 70, 110, 150 }, 'chm_sil'),
     SEL('Style', { 'Filled', 'Glow Aura', 'Neon Outline', 'Hologram', 'Pulse', 'Gradient', 'Dots', 'Tube Skeleton', 'Flame' }, 0, 'chm_sil_style'),
@@ -1075,8 +1075,8 @@ local function saveConfig()
     for k in pairs(DEF) do t.options[k] = O[k] end
     inicfg.save(t, CFG_FILE)
 end
-DEF.cfg_rev = 2
-O.cfg_rev = 2
+DEF.cfg_rev = 3
+O.cfg_rev = 3
 local function loadConfig()
     local t = inicfg.load(nil, CFG_FILE)
     if not t or not t.options then return false end
@@ -1090,6 +1090,12 @@ local function loadConfig()
         end
         O.aa_force = false
         O.cfg_rev = 2
+        saveConfig()
+    end
+    -- v4.5.1: чамсы на одинаковом скине красили и своего персонажа — выключаем один раз
+    if (tonumber(t.options.cfg_rev) or 0) < 3 then
+        O.chm_same = false
+        O.cfg_rev = 3
         saveConfig()
     end
     return true
@@ -2668,11 +2674,18 @@ function VIS.chamsTick(ready, now)
             if not e.vis and sH.mode > 0 then s = sH end
             if e.team then s = sT end
             if sS.mode > 0 and VIS.shot[e.id] and now - VIS.shot[e.id] < 0.3 then s = sS end
-            if s.mode > 0 and not O.chm_same and sL.mode == 0 and getCharModel(e.ped) == myModel then s = nil end
+            -- геометрия общая на скин: покраска врага с вашим скином покрасит и вас.
+            -- Такого врага не красим (рисуем ему оверлей), а свою модель держим в оригинале / в своих чамсах.
+            e.sameSkin = getCharModel(e.ped) == myModel
+            if e.sameSkin and (not O.chm_same or sL.mode > 0) then s = nil end
             if s and s.mode > 0 then VIS.ch.dirty = true else s = nil end
-            pcall(VIS.paintPed, e.ped, s, now, e.hp or sampGetPlayerHealth(e.id))
+            if not (e.sameSkin and sL.mode > 0) then
+                pcall(VIS.paintPed, e.ped, s, now, e.hp or sampGetPlayerHealth(e.id))
+            end
         end
     end
+    -- страховка: своя модель всегда в оригинале, если свои чамсы выключены и красить свой скин не просили
+    if sL.mode == 0 and not O.chm_same then pcall(VIS.paintPed, PLAYER_PED, nil) end
 end
 function VIS.diag()
     local ok = VIS.chInit()
@@ -2935,7 +2948,7 @@ function VIS.collectPlayers(now, cx, cy, cz, fx, fy)
                             end
                             -- скелет / точка головы / направление взгляда
                             local okp, ptr = pcall(getCharPointer, ped)
-                            if okp and ptr and ptr ~= 0 and (O.esp_skel or O.esp_headdot or O.esp_look or O.chm_sil) then
+                            if okp and ptr and ptr ~= 0 and (O.esp_skel or O.esp_headdot or O.esp_look or O.chm_sil or (O.pl_model_player or 0) > 0 or (O.pl_model_behind_walls or 0) > 0) then
                                 local bones = {}
                                 for _, bid in ipairs(VIS.BONE_IDS) do
                                     local okb, bx3, by3, bz3 = pcall(VIS.bone, ptr, bid)
@@ -3499,7 +3512,10 @@ function VIS.drawPlayer(dl, e, sw, sh, now)
         if bcm == 1 then local hk = e.hp / 100; acc = { 255 * math.min(1, 2 * (1 - hk)), 255 * math.min(1, 2 * hk), 70, 255 }
         elseif bcm == 2 then acc = { e.r, e.g, e.b, 255 } end
         local sw2 = O.chm_sil_when or 0
-        if O.chm_sil and e.bones and (sw2 == 1 or (sw2 == 0 and not vis) or (sw2 == 2 and vis)) then pcall(VIS.drawSil, dl, e) end
+        if O.chm_sil and e.bones and (sw2 == 1 or (sw2 == 0 and not vis) or (sw2 == 2 and vis)) then pcall(VIS.drawSil, dl, e)
+        elseif e.sameSkin and e.bones and not O.chm_same and ((O.pl_model_player or 0) > 0 or (O.pl_model_behind_walls or 0) > 0) then
+            pcall(VIS.drawSil, dl, e)      -- скин как у вас: вместо покраски модели — оверлей
+        end
         if O.pl_model_glow then
             local gc = VIS.rgb('pl_model_glow')
             local w, h = x2 - x1, y2 - y1
