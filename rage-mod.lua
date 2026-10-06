@@ -20,7 +20,7 @@
 
 script_name('rage-mod')
 script_author('rage-mod')
-script_version('4.0.0')
+script_version('4.0.1')
 
 local imgui    = require 'mimgui'
 local encoding = require 'encoding'
@@ -52,7 +52,11 @@ end
 
 -- ============================================================ УТИЛИТЫ
 local function chat(text)
-    sampAddChatMessage(u8:decode('{4E83FF}[rage-mod]{FFFFFF} ' .. text), -1)
+    -- SA-MP падает на слишком длинных строках чата — режем до 140 байт
+    local ok, s = pcall(u8.decode, u8, '{4E83FF}[rage-mod]{FFFFFF} ' .. tostring(text))
+    if not ok or not s then return end
+    if #s > 140 then s = s:sub(1, 140) end
+    sampAddChatMessage(s, -1)
 end
 
 local function clamp(v, a, b) return math.max(a, math.min(b, v)) end
@@ -1397,7 +1401,8 @@ function sampev.onSendAimSync(data)
     if not aaActive() or (O.aa_pitch or 0) == 0 then return end
     if O.aa_mode == 4 and aaFlicking() then return end
     local pitch = math.rad(O.aa_pitch == 1 and -89 or 89)
-    local yaw = math.rad(aaYaw(getCharHeading(PLAYER_PED)))
+    local hd = getCharHeading(PLAYER_PED)
+    local yaw = math.rad(localSpinning and hd or aaYaw(hd))
     local c = math.cos(pitch)
     data.camFront.x = -math.sin(yaw) * c
     data.camFront.y = math.cos(yaw) * c
@@ -1557,8 +1562,17 @@ end
 local function aaTick(free, I)
     localSpinning = false
     if not I or not aaActive() then aaPos = nil; return end
-    if O.aa_local and O.aa_mode == 0 and not isCharInWater(PLAYER_PED) then
-        setCharHeading(PLAYER_PED, aaSpinAngle())
+    local m = O.aa_mode
+    if O.aa_local and (m == 0 or m == 3 or m == 4) and not isCharInWater(PLAYER_PED) then
+        -- Show Locally: Spin — крутим; Backward — спиной к камере; Backward Flick — спиной, при выстреле лицом
+        local h
+        if m == 0 then
+            h = aaSpinAngle()
+        else
+            local cam = camHeading()
+            h = (m == 4 and aaFlicking()) and cam or (cam + 180) % 360
+        end
+        setCharHeading(PLAYER_PED, h)
         localSpinning = true
         aaMoveTick(free, I)
     else
@@ -1712,7 +1726,7 @@ function RG.dmgOk(dmg, hp)
 end
 
 -- поиск цели: { id, ped, x, y, z, bp, hp, ang }
-function RG.find(weapon)
+function RG.find(weapon, strict)
     local dmg = RG.DMG[weapon]
     if not dmg then return nil end
     local cx, cy, cz, fx, fy, fz = RG.cam()
@@ -1732,7 +1746,7 @@ function RG.find(weapon)
             local ok, ped = sampGetCharHandleBySampPlayerId(id)
             if ok and doesCharExist(ped) and not isCharDead(ped) and not sampIsPlayerPaused(id) then
                 local hp = sampGetPlayerHealth(id) + sampGetPlayerArmor(id)
-                if hp > 0 and RG.dmgOk(dmg, hp) then
+                if hp > 0 and (not strict or RG.dmgOk(dmg, hp)) then
                     local x, y, z = getCharCoordinates(ped)
                     if lead > 0 then
                         local vx, vy, vz = getCharVelocity(ped)
@@ -1775,7 +1789,7 @@ function RG.onBullet(data)
     if not dmg then return end
     local hc = O.rage_sel_hit_chance or 0
     if hc > 0 and math.random(100) > hc then return end
-    local t = RG.find(w)
+    local t = RG.find(w, false)
     if not t then
         -- Remove Spread: без цели — пуля летит точно в прицел
         local rs = O.rage_other_remove_spread or 0
@@ -1798,7 +1812,12 @@ function RG.onBullet(data)
     data.center.x, data.center.y, data.center.z = t.x - t.px, t.y - t.py, t.z - t.pz
     if alreadyHit then return end     -- игра сама засчитала попадание — урон не дублируем
     local id, bp = t.id, t.bp
+    if bit.band(O.m_feat_log_events or 0, 1) ~= 0 then
+        local okn, nm = pcall(sampGetPlayerNickname, id)
+        chat(('silent {3DE07A}%.1f{FFFFFF} -> %s[%d]'):format(dmg, okn and nm or '?', id))
+    end
     lua_thread.create(function()
+        if not sampIsPlayerConnected(id) then return end
         sampSendGiveDamage(id, dmg, w, bp)
         if O.m_feat_hit_sound then addOneOffSound(0.0, 0.0, 0.0, 17802) end
         if O.rage_other_double_tap then
@@ -1820,7 +1839,7 @@ function RG.tick(free)
     local now = os.clock()
     if now - RG.lastScan > 0.03 then          -- поиск цели не чаще ~30 раз в секунду
         RG.lastScan = now
-        RG.lastT = RG.find(w)
+        RG.lastT = RG.find(w, true)
     end
     if not RG.lastT then return end
     -- Delay Shot: Accuracy — стреляем только когда почти стоим
