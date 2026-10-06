@@ -20,7 +20,7 @@
 
 script_name('rage-mod')
 script_author('rage-mod')
-script_version('4.8.12')
+script_version('4.8.13')
 
 local imgui    = require 'mimgui'
 local encoding = require 'encoding'
@@ -264,7 +264,8 @@ local RU = {
     ['Show Position'] = 'Показывать точку', ['Through Walls'] = 'Сквозь стены',
     ['Engine Shot (real)'] = 'Выстрел движком (настоящий)', ['Scripted Jump'] = 'Свой прыжок', ['Packet (fake)'] = 'Пакетом (фейк)',
     ['Rapid Fire'] = 'Рапид фаер в прыжке', ['Auto +C'] = 'Авто +C', ['AUTO +C'] = 'АВТО +C',
-    ['C Delay'] = 'Задержка C', ['Stand Up'] = 'Вставать обратно', ['Stand Delay'] = 'Задержка подъёма',
+    ['C Delay'] = 'Задержка C', ['Fast +C (pro)'] = 'Фаст +C (как у профи)', ['Classic'] = 'Классический',
+    ['Re-press Fire'] = 'Перенажимать огонь', ['Stand Up'] = 'Вставать обратно', ['Stand Delay'] = 'Задержка подъёма',
     ['Only When Aiming'] = 'Только при прицеливании', ['Weapons'] = 'Оружие',
     ['Jump Power'] = 'Сила прыжка', ['Rate Source'] = 'Темп стрельбы', ['Game (mods)'] = 'Как в игре (с модами)',
     ['Script'] = 'Скрипт (ползунок)', ['Own Jump'] = 'Свой прыжок с оружием',
@@ -1089,9 +1090,11 @@ VIS.SUB_JA = { title = 'JUMP ATTACK', rows = CARD('ja', {
 VIS.SUB_PC = { title = 'AUTO +C', rows = CARD('pc', {
     T_('Enabled', false, 'pc_on'),
     MUL('Weapons', { 'Deagle', 'Shotgun', 'Country Rifle', 'Sniper', 'M4 / AK' }, 0x01, 'pc_wpn'),
-    SL('C Delay', 0, 200, 40, '%d ms', false, 'pc_delay'),
-    T_('Stand Up', true, 'pc_stand'),
-    SL('Stand Delay', 20, 300, 80, '%d ms', false, 'pc_stand_ms'),
+    SEL('Mode', { 'Fast +C (pro)', 'Classic' }, 0, 'pc_mode'),
+    SL('C Delay', 0, 200, 0, '%d ms', false, 'pc_delay2'),
+    T_('Re-press Fire', true, 'pc_refire'),
+    T_('Stand Up', false, 'pc_stand2'),
+    SL('Stand Delay', 20, 300, 60, '%d ms', false, 'pc_stand_ms'),
     T_('Only When Aiming', true, 'pc_aim'),
 }) }
 local ROWS = {
@@ -3079,8 +3082,40 @@ function RG.pcShot()
     if O.pc_aim and not isKeyDown(0x02) then return end
     RG.pc.pending = true
 end
+-- Фаст +C: покадровая машина состояний в main-цикле (без lua_thread и wait — без лишних кадров).
+-- выстрел -> [задержка] -> C нажат 1 кадр (+ огонь отпущен на 1 кадр, чтобы зажатая ЛКМ сразу дала
+-- следующий выстрел) -> стреляешь из приседа -> следующий C поднимает. Ритм: выстрел-C-выстрел-C.
+function RG.pcFast(free)
+    local pc = RG.pc
+    local now = os.clock()
+    if pc.pending then
+        pc.pending = false
+        pc.stage, pc.t = 1, now
+    end
+    if not pc.stage then return end
+    if not free then pc.stage = nil; return end
+    if pc.stage == 1 then
+        if (now - pc.t) * 1000 < (O.pc_delay2 or 0) then return end
+        setGameKeyState(18, 255)                               -- C
+        if O.pc_refire ~= false then setGameKeyState(17, 0) end
+        TR.E('pc.c')
+        pc.stage = 2
+    elseif pc.stage == 2 then
+        setGameKeyState(18, 0)
+        if O.pc_refire ~= false then setGameKeyState(17, 0) end
+        pc.stage, pc.t = (O.pc_stand2 and 3 or nil), now
+    elseif pc.stage == 3 then
+        if (now - pc.t) * 1000 < (O.pc_stand_ms or 60) then return end
+        if isCharDucking(PLAYER_PED) then setGameKeyState(18, 255); TR.E('pc.stand') end
+        pc.stage = 4
+    elseif pc.stage == 4 then
+        setGameKeyState(18, 0)
+        pc.stage = nil
+    end
+end
 function RG.pcTick(free)
     local pc = RG.pc
+    if (O.pc_mode or 0) == 0 then return RG.pcFast(free) end
     if not pc.pending then return end
     pc.pending = false
     if pc.busy or not free then return end
@@ -3090,10 +3125,10 @@ function RG.pcTick(free)
             for _ = 1, 2 do setGameKeyState(18, 255); wait(0) end
             setGameKeyState(18, 0); wait(0)
         end
-        wait(O.pc_delay or 40)
+        wait(O.pc_delay2 or 0)
         TR.E('pc.crouch')
         tap()
-        if O.pc_stand ~= false then
+        if O.pc_stand2 then
             wait(O.pc_stand_ms or 80)
             if isCharDucking(PLAYER_PED) then TR.E('pc.stand'); tap() end
         end
