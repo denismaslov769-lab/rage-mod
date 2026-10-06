@@ -19,7 +19,7 @@
 
 script_name('rage-mod')
 script_author('rage-mod')
-script_version('3.3.0')
+script_version('3.3.1')
 
 local imgui    = require 'mimgui'
 local encoding = require 'encoding'
@@ -1355,21 +1355,57 @@ local function moveHeading()
     return (camHeading() + math.deg(math.atan2(-r, f))) % 360
 end
 
+-- позиция персонажа напрямую в матрице (только X/Y — высоту оставляем игре: лестницы, склоны, гравитация)
+local function pedMatrix()
+    local ptr = getCharPointer(PLAYER_PED)
+    if not ptr or ptr == 0 then return nil end
+    local m = rd32(ptr + 0x14)
+    if m == 0 then return nil end
+    return ffi.cast('float*', m + 0x30)
+end
+
+local aaPos, aaLast = nil, 0
+local AA_SPEED_WALK, AA_SPEED_RUN, AA_SPEED_SPRINT = 1.8, 5.4, 8.2
+
+local function aaMove(mh)
+    local now = os.clock()
+    local dt = clamp(now - aaLast, 0, 0.1)
+    aaLast = now
+    local x, y, z = getCharCoordinates(PLAYER_PED)
+    -- старт / телепорт / сильный сдвиг игрой — синхронизируемся с реальной позицией
+    if not aaPos or math.abs(aaPos.x - x) + math.abs(aaPos.y - y) > 2.5 then aaPos = { x = x, y = y } end
+    if not mh or isCharInAir(PLAYER_PED) or isCharInWater(PLAYER_PED) then
+        aaPos.x, aaPos.y = x, y
+        return
+    end
+    local speed = isKeyDown(0x20) and AA_SPEED_SPRINT or (isKeyDown(0x12) and AA_SPEED_WALK or AA_SPEED_RUN)
+    local h = math.rad(mh)
+    local dx, dy = -math.sin(h), math.cos(h)
+    local nx, ny = aaPos.x + dx * speed * dt, aaPos.y + dy * speed * dt
+    -- не проходим сквозь стены/машины/объекты (проверка чуть впереди, на уровне пояса)
+    if isLineOfSightClear(aaPos.x, aaPos.y, z, nx + dx * 0.45, ny + dy * 0.45, z, true, true, false, true, false) then
+        aaPos.x, aaPos.y = nx, ny
+    end
+    local p = pedMatrix()
+    if p then
+        p[0], p[1] = aaPos.x, aaPos.y
+    end
+    -- гасим горизонтальную скорость от анимации (она направлена по «крутящемуся» взгляду)
+    local _, _, vz = getCharVelocity(PLAYER_PED)
+    setCharVelocity(PLAYER_PED, dx * speed, dy * speed, vz)
+end
+
 local function aaTick(free)
     localSpinning = false
-    if not aaActive() then return end
+    if not aaActive() then aaPos = nil; return end
     if O.aa_local and O.aa_mode == 0 then
-        local mh = free and moveHeading() or nil
-        local spin = aaSpinAngle()
-        setCharHeading(PLAYER_PED, spin)
+        -- крутим персонажа и при этом двигаем его сами туда, куда нажаты WASD (относительно камеры):
+        -- игра двигает педа по направлению взгляда, поэтому её движение мы заменяем своим
+        setCharHeading(PLAYER_PED, aaSpinAngle())
         localSpinning = true
-        -- на бегу: персонаж крутится, но двигается туда, куда жмёте
-        if mh and not isCharInAir(PLAYER_PED) then
-            local speed = isKeyDown(0x20) and 8.0 or (isKeyDown(0x12) and 1.8 or 5.2)
-            local h = math.rad(mh)
-            local _, _, vz = getCharVelocity(PLAYER_PED)
-            setCharVelocity(PLAYER_PED, -math.sin(h) * speed, math.cos(h) * speed, vz)
-        end
+        aaMove(free and moveHeading() or nil)
+    else
+        aaPos = nil
     end
     -- частая отправка синхронизации, чтобы вращение у других было плавным
     if O.aa_force and os.clock() - lastForce > 0.04 then
