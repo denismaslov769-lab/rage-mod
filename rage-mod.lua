@@ -9,8 +9,8 @@
     Rage/Legit/ESP/Misc — ТОЛЬКО интерфейс (значения сохраняются в конфиг).
     Anti-Aim (крутилка) — рабочий: Rage -> ANTI-AIM -> Enabled, настройки в «Yaw ›».
     Крутилку видят ДРУГИЕ игроки (подмена поворота в PlayerSync) — и стоя, и на бегу.
-    «Show Locally» крутит и вашего персонажа, когда он стоит. На бегу и в прыжке поворот
-    отдаётся игре (нормальный бег/спринт/прыжок), а другие игроки всё равно видят крутилку.
+    «Show Locally» крутит и вашего персонажа — стоя, на бегу и в прыжке. Крутится только
+    отрисовка (хук CPed::Render), реальный поворот остаётся у игры, поэтому бег/прыжок нормальные.
 
     Шрифты (необязательно): moonloader\resource\rage-mod\SSTMedium.TTF, SSTBold.TTF, fa-solid-900.ttf
     Активация: /ragemd или клавиша (по умолчанию Insert, меняется в меню профиля в тулбаре).
@@ -19,7 +19,7 @@
 
 script_name('rage-mod')
 script_author('rage-mod')
-script_version('3.3.2')
+script_version('3.4.0')
 
 local imgui    = require 'mimgui'
 local encoding = require 'encoding'
@@ -1341,30 +1341,122 @@ function sampev.onSendPlayerSync(data)
     q[3] = aaSign * math.sin(h / 2)
 end
 
--- игрок сам двигается / прыгает? (через игровой пад — работает с любыми биндами и геймпадом)
-local BTN_JUMP = 14
-local function aaPlayerMoving(free)
-    if not free then return false end
-    local lx, ly = getPositionOfAnalogueSticks(0)
-    return lx ~= 0 or ly ~= 0
+-- ---------- визуальная крутилка у себя («Show Locally») ----------
+-- GTA двигает педа по его настоящему повороту, поэтому настоящий heading мы НЕ трогаем
+-- (бег, спринт, прыжки, коллизии — полностью нативные). Крутим только то, что рисуется:
+-- перехватываем CPed::PreRender / CPed::Render в vtable CPlayerPed и на время отрисовки
+-- подменяем матрицу поворота нашего педа, а после Render возвращаем исходную.
+pcall(ffi.cdef, [[
+    int VirtualProtect(void* addr, unsigned long size, unsigned long newProt, unsigned long* oldProt);
+]])
+
+local ADDR_PED_PRERENDER, ADDR_PED_RENDER, ADDR_ENTITY_UPDATERW = 0x5E8A20, 0x5E7680, 0x446F90
+local ENTITY_FN = 'void(__thiscall*)(void*)'
+local updateRW = ffi.cast(ENTITY_FN, ADDR_ENTITY_UPDATERW)
+
+local vis = {
+    on = false, ped = 0,          -- обновляется в aaTick (опкоды в колбэках рендера не вызываем)
+    hooked = false, failed = false,
+    vt = nil, iPre = nil, iRen = nil, origPre = nil, origRen = nil, cbPre = nil, cbRen = nil,
+    saved = ffi.new('float[8]'), rotated = false,
+}
+
+local function visRestore()
+    if not vis.rotated then return end
+    vis.rotated = false
+    local ptr = vis.ped
+    if ptr == 0 then return end
+    local mp = rd32(ptr + 0x14)
+    if mp == 0 then return end
+    local m = ffi.cast('float*', mp)
+    m[0], m[1], m[2], m[4], m[5], m[6] = vis.saved[0], vis.saved[1], vis.saved[2], vis.saved[3], vis.saved[4], vis.saved[5]
+    updateRW(ffi.cast('void*', ptr))
 end
-local function aaPlayerJumping(free)
-    if isCharInAir(PLAYER_PED) or isCharInWater(PLAYER_PED) then return true end
-    return free and isButtonPressed(PLAYER_HANDLE, BTN_JUMP)
+
+local function visApply(this)
+    local ptr = tonumber(ffi.cast('uint32_t', this))
+    if not vis.on or ptr ~= vis.ped or vis.rotated then return end
+    local mp = rd32(ptr + 0x14)
+    if mp == 0 then return end
+    local m = ffi.cast('float*', mp)
+    vis.saved[0], vis.saved[1], vis.saved[2] = m[0], m[1], m[2]
+    vis.saved[3], vis.saved[4], vis.saved[5] = m[4], m[5], m[6]
+    local h = math.rad(aaSpinAngle())
+    local c, s = math.cos(h), math.sin(h)
+    m[0], m[1], m[2] = c, s, 0      -- right
+    m[4], m[5], m[6] = -s, c, 0     -- forward
+    vis.rotated = true
+    updateRW(this)
+end
+
+local function vtWrite(i, fnAddr)
+    local slot = vis.vt + i * 4
+    local old = ffi.new('unsigned long[1]')
+    ffi.C.VirtualProtect(ffi.cast('void*', slot), 4, 0x40, old)
+    ffi.cast('uint32_t*', slot)[0] = fnAddr
+    ffi.C.VirtualProtect(ffi.cast('void*', slot), 4, old[0], old)
+end
+
+local function visHook(pedPtr)
+    if vis.hooked or vis.failed or pedPtr == 0 then return end
+    local vt = rd32(pedPtr)
+    local iPre, iRen
+    for i = 10, 24 do
+        local f = rd32(vt + i * 4)
+        if f == ADDR_PED_PRERENDER then iPre = i end
+        if f == ADDR_PED_RENDER then iRen = i end
+    end
+    if not iPre or not iRen then
+        vis.failed = true
+        chat('{E03D3D}Show Locally: не нашёл CPed::Render (не 1.0 US exe или vtable уже перехвачена) — крутилка у себя только стоя.')
+        return
+    end
+    vis.vt, vis.iPre, vis.iRen = vt, iPre, iRen
+    vis.origPre = ffi.cast(ENTITY_FN, ADDR_PED_PRERENDER)
+    vis.origRen = ffi.cast(ENTITY_FN, ADDR_PED_RENDER)
+    vis.cbPre = ffi.cast(ENTITY_FN, function(this)
+        pcall(visApply, this)
+        vis.origPre(this)
+    end)
+    vis.cbRen = ffi.cast(ENTITY_FN, function(this)
+        pcall(visApply, this)        -- если PreRender пропущен — повернём здесь
+        vis.origRen(this)
+        if tonumber(ffi.cast('uint32_t', this)) == vis.ped then pcall(visRestore) end
+    end)
+    vtWrite(iPre, tonumber(ffi.cast('uint32_t', vis.cbPre)))
+    vtWrite(iRen, tonumber(ffi.cast('uint32_t', vis.cbRen)))
+    vis.hooked = true
+end
+
+local function visUnhook()
+    if not vis.hooked then return end
+    vis.on = false
+    pcall(visRestore)
+    vtWrite(vis.iPre, ADDR_PED_PRERENDER)
+    vtWrite(vis.iRen, ADDR_PED_RENDER)
+    vis.cbPre:free(); vis.cbRen:free()
+    vis.hooked = false
 end
 
 local function aaTick(free)
     localSpinning = false
+    -- если педа не отрисовали в прошлом кадре — возвращаем настоящую матрицу до обработки физики
+    pcall(visRestore)
+    local ptr = doesCharExist(PLAYER_PED) and getCharPointer(PLAYER_PED) or 0
+    vis.ped = ptr or 0
+    vis.on = false
     if not aaActive() then return end
     if O.aa_local and O.aa_mode == 0 then
-        -- GTA двигает педа строго по его повороту (root motion анимаций бега/прыжка),
-        -- поэтому крутить реальный heading на бегу/в прыжке нельзя — игра ломает движение.
-        -- На бегу и в прыжке heading отдаём игре (нативный бег, спринт, прыжок, коллизии),
-        -- а крутилку для ДРУГИХ игроков продолжает подменять onSendPlayerSync.
-        -- Стоя на месте — крутим и локально.
-        if not aaPlayerMoving(free) and not aaPlayerJumping(free) then
-            setCharHeading(PLAYER_PED, aaSpinAngle())
-            localSpinning = true
+        visHook(vis.ped)
+        if vis.hooked then
+            vis.on = true      -- крутим только картинку, в синк уходит aaYaw → то же aaSpinAngle()
+        elseif not isCharInAir(PLAYER_PED) then
+            -- запасной вариант без хука: крутим настоящий heading, но только стоя
+            local lx, ly = getPositionOfAnalogueSticks(0)
+            if not free or (lx == 0 and ly == 0) then
+                setCharHeading(PLAYER_PED, aaSpinAngle())
+                localSpinning = true
+            end
         end
     end
     -- частая отправка синхронизации, чтобы вращение у других было плавным
@@ -1439,6 +1531,7 @@ end
 
 function onScriptTerminate(scr)
     if scr == thisScript() then
+        visUnhook()
         saveConfig()
         releaseWeaponIcons()
     end
