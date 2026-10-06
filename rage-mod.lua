@@ -20,7 +20,7 @@
 
 script_name('rage-mod')
 script_author('rage-mod')
-script_version('3.6.0')
+script_version('3.6.1')
 
 local imgui    = require 'mimgui'
 local encoding = require 'encoding'
@@ -1634,10 +1634,26 @@ function sampev.onSendGiveDamage(id, dmg, weapon, part)
     if logOn(1) then chat(('урон {3DE07A}%.1f{FFFFFF} -> %s'):format(dmg, pname(id))) end
 end
 
+-- урон от окружения (id 65535: падение, огонь, вода и т.п.) не логируем — иначе флуд;
+-- урон от одного игрока, пришедший подряд, суммируем в одну строку раз в 0.5 с
+local takeAcc = { id = -1, dmg = 0, t = 0 }
 function sampev.onSendTakeDamage(id, dmg, weapon, part)
-    if logOn(2) then
-        local from = (id == 65535) and 'окружения' or pname(id)
-        chat(('получено {E03D3D}%.1f{FFFFFF} от %s'):format(dmg, from))
+    if not logOn(2) or id == 65535 then return end
+    local now = os.clock()
+    if takeAcc.id == id and now - takeAcc.t < 0.5 then
+        takeAcc.dmg = takeAcc.dmg + dmg
+        return
+    end
+    if takeAcc.id ~= -1 and takeAcc.dmg > 0 then
+        chat(('получено {E03D3D}%.1f{FFFFFF} от %s'):format(takeAcc.dmg, pname(takeAcc.id)))
+    end
+    takeAcc.id, takeAcc.dmg, takeAcc.t = id, dmg, now
+end
+
+local function logTick()
+    if takeAcc.id ~= -1 and os.clock() - takeAcc.t >= 0.5 then
+        if takeAcc.dmg > 0 then chat(('получено {E03D3D}%.1f{FFFFFF} от %s'):format(takeAcc.dmg, pname(takeAcc.id))) end
+        takeAcc.id, takeAcc.dmg = -1, 0
     end
 end
 
@@ -1740,6 +1756,7 @@ function main()
         aaTick(free, I)
         mvTick(free, I)
         qsTick()
+        logTick()
         setAntiAfk(O.m_feat_prevent_afk_kick)
         if os.clock() - lastIconCheck > 1.5 then
             lastIconCheck = os.clock()
