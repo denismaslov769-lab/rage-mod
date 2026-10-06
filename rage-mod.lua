@@ -20,7 +20,7 @@
 
 script_name('rage-mod')
 script_author('rage-mod')
-script_version('4.8.4')
+script_version('4.8.5')
 
 local imgui    = require 'mimgui'
 local encoding = require 'encoding'
@@ -259,7 +259,7 @@ local RU = {
     ['On Release'] = 'При отпускании', ['Shot or Release'] = 'Выстрел или отпускание', ['Method'] = 'Способ',
     ['Run Back'] = 'Бегом', ['Teleport'] = 'Телепорт', ['Return Speed'] = 'Скорость возврата',
     ['Show Position'] = 'Показывать точку', ['Through Walls'] = 'Сквозь стены',
-    ['Real Shot (scripted jump)'] = 'Настоящий выстрел (свой прыжок)', ['Packet (fake)'] = 'Пакетом (фейк)',
+    ['Engine Shot (real)'] = 'Выстрел движком (настоящий)', ['Scripted Jump'] = 'Свой прыжок', ['Packet (fake)'] = 'Пакетом (фейк)',
     ['Jump Power'] = 'Сила прыжка',
     ['Jump Attack'] = 'Стрельба в прыжке', ['JUMP ATTACK'] = 'СТРЕЛЬБА В ПРЫЖКЕ', ['Fire From'] = 'Чем стрелять',
     ['On Click'] = 'По клику (ЛКМ)', ['With Trigger Bot'] = 'Триггерботом', ['Click or Trigger'] = 'ЛКМ или триггер',
@@ -1063,7 +1063,7 @@ VIS.SUB_QP = { title = 'QUICK PEEK ASSIST', rows = CARD('qp', {
 -- Jump Attack: в прыжке игра стрелять не даёт — выстрел (bullet sync + урон) отправляет скрипт
 VIS.SUB_JA = { title = 'JUMP ATTACK', rows = CARD('ja', {
     T_('Enabled', false, 'ja_on'),
-    SEL('Method', { 'Real Shot (scripted jump)', 'Packet (fake)' }, 0, 'ja_method'),
+    SEL('Method', { 'Engine Shot (real)', 'Scripted Jump', 'Packet (fake)' }, 0, 'ja_method2'),
     SL('Jump Power', 3, 9, 5.5, '%.1f', true, 'ja_power'),
     SEL('Fire From', { 'On Click', 'With Trigger Bot', 'Click or Trigger' }, 2, 'ja_src'),
     T_('Need Target', true, 'ja_need'),
@@ -2504,7 +2504,7 @@ function RG.onBullet(data)
     RG.qp.shotT = os.clock()
     if not spawnedAt then return end
     local silent = RG.on() and O.rage_main_silent_aim
-    local tt = RG.tbShotTarget()      -- цель триггербота (nil, если выстрел не от него)
+    local tt = RG.jaShotTarget() or RG.tbShotTarget()   -- цель Jump Attack / триггербота (nil — обычный выстрел)
     -- ни сайлента, ни триггера — работает только Magic Bullet (если включён)
     if not silent and not tt then RG.magic(data); return end
     if not tt and (O.mb_mode or 1) ~= 0 and RG.magic(data) then return end
@@ -2760,7 +2760,36 @@ end
 RG.JA_RATE = { [22] = 0.25, [23] = 0.4, [24] = 0.8, [25] = 1.0, [26] = 0.3, [27] = 0.35, [28] = 0.07, [29] = 0.09,
                [30] = 0.11, [31] = 0.11, [32] = 0.07, [33] = 1.0, [34] = 1.2, [38] = 0.03 }
 RG.ja = { lastT = 0, sending = false, warned = false }
-function RG.jaWindow() return O.ja_on and (O.ja_method or 0) == 1 and os.clock() - RG.ja.lastT < 0.25 end
+function RG.jaWindow() return O.ja_on and (O.ja_method2 or 0) ~= 1 and os.clock() - RG.ja.lastT < 0.25 end
+-- цель выстрела Jump Attack (для подмены пули в onBullet)
+function RG.jaShotTarget()
+    local ja = RG.ja
+    if not O.ja_on or not ja.t or os.clock() - ja.lastT > 0.2 then return nil end
+    return ja.t
+end
+-- Выстрел самим движком: CWeapon::Fire (0x742300, GTA SA 1.0 US) с владельцем = наш пед.
+-- Это тот же путь, что и обычный выстрел: SA-MP сам шлёт bullet sync, тратятся патроны, есть звук и вспышка.
+-- В прыжке игра просто не вызывает Fire (мешает задача прыжка) — вызываем сами.
+function RG.jaEngineFire(w, ox, oy, oz, tx, ty, tz, tped)
+    if not RG.jaFireFn then
+        RG.jaFireFn = ffi.cast('bool(__thiscall*)(void*, void*, void*, void*, void*, void*, void*)', 0x742300)
+    end
+    local ped = getCharPointer(PLAYER_PED)
+    if not ped or ped == 0 then return false, 'no ped' end
+    local slot = ffi.cast('uint8_t*', ped + 0x718)[0]
+    local wp = ped + 0x5A0 + slot * 0x1C                     -- CWeapon активного слота
+    local wt = ffi.cast('int32_t*', wp)
+    if wt[0] ~= w then return false, 'slot ' .. tostring(wt[0]) end
+    if wt[1] == 2 then return false, 'reloading' end         -- m_nState: 2 = перезарядка
+    if wt[2] <= 0 then return false, 'empty clip' end        -- m_nAmmoInClip
+    local o = ffi.new('float[3]', ox, oy, oz)
+    local tv = ffi.new('float[3]', tx, ty, tz)
+    local te = nil
+    if tped then local okp, pp = pcall(getCharPointer, tped); if okp and pp and pp ~= 0 then te = ffi.cast('void*', pp) end end
+    local r = RG.jaFireFn(ffi.cast('void*', wp), ffi.cast('void*', ped), o, o, te, tv, nil)
+    return r and true or false, 'fire=' .. tostring(r)
+end
+if jit then jit.off(RG.jaEngineFire, true) end
 -- анимация выстрела верхней частью тела (ноги продолжают прыжок)
 RG.JA_ANIM = { [22] = { 'COLT45', 'colt45_fire' }, [23] = { 'SILENCED', 'Silence_fire' }, [24] = { 'PYTHON', 'python_fire' },
     [25] = { 'SHOTGUN', 'shotgun_fire' }, [26] = { 'COLT45', 'colt45_fire' }, [27] = { 'BUDDY', 'buddy_fire' },
@@ -2843,7 +2872,8 @@ end
 function RG.jaTick(free)
     local ja = RG.ja
     if not O.ja_on or not free or not spawnedAt or os.clock() - spawnedAt < 5 then return end
-    if (O.ja_method or 0) == 0 then return RG.jaJumpTick(free) end
+    local method = O.ja_method2 or 0
+    if method == 1 then return RG.jaJumpTick(free) end
     if not isCharOnFoot(PLAYER_PED) or not isCharInAir(PLAYER_PED) or isCharInWater(PLAYER_PED) then return end
     local w = getCurrentCharWeapon(PLAYER_PED)
     local dmg = RG.DMG[w]
@@ -2855,7 +2885,7 @@ function RG.jaTick(free)
     if not click and not trig then return end
     if now - ja.lastT < (RG.JA_RATE[w] or 0.3) / ((O.ja_rate or 100) / 100) then return end
     local ammo = getAmmoInCharWeapon(PLAYER_PED, w)
-    if O.ja_ammo and ammo <= 0 then return end
+    if (O.ja_ammo or method == 0) and ammo <= 0 then return end
     -- цель: триггер -> сайлент/рейдж -> никакой (пуля в прицел)
     local t = trig and RG.tbShotTarget() or nil
     if not t then
@@ -2884,6 +2914,15 @@ function RG.jaTick(free)
     pcall(RG.jaAnim, w)
     pcall(sampForceOnfootSync)
     pcall(sampForceAimSync)
+    if method == 0 then
+        -- настоящий выстрел движком; подмену пули в цель и урон сделает onBullet (как у сайлента)
+        ja.t = t
+        local ok, r, why = pcall(RG.jaEngineFire, w, d.origin.x, d.origin.y, d.origin.z, d.target.x, d.target.y, d.target.z, t and t.ped)
+        TR.E('ja.engine ok=' .. tostring(ok) .. ' r=' .. tostring(r) .. ' ' .. tostring(why))
+        if not ok and not ja.warned then ja.warned = true; chat('Jump Attack: ошибка выстрела движком: ' .. tostring(r)) end
+        if ok and r then RG.qp.shotT = now end
+        return
+    end
     local okb, eb = pcall(RG.jaSendBullet, d)
     if not okb then
         TR.E('ja.err ' .. tostring(eb))
