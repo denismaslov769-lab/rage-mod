@@ -20,7 +20,7 @@
 
 script_name('rage-mod')
 script_author('rage-mod')
-script_version('4.8.24')
+script_version('4.8.25')
 
 local imgui    = require 'mimgui'
 local encoding = require 'encoding'
@@ -2063,7 +2063,7 @@ function sampev.onSendAimSync(data)
     TR.T('aimsync')
     if not aaActive() or (O.aa_pitch or 0) == 0 then return end
     if O.aa_mode == 4 and aaFlicking() then return end
-    local pitch = math.rad(O.aa_pitch == 1 and -89 or 89)
+    local pitch = math.rad(O.aa_pitch == 1 and 89 or -89)   -- у удалённых клиентов знак наоборот: +89 = вниз
     local hd = getCharHeading(PLAYER_PED)
     local yaw = math.rad(localSpinning and hd or aaYaw(hd))
     local c = math.cos(pitch)
