@@ -20,7 +20,7 @@
 
 script_name('rage-mod')
 script_author('rage-mod')
-script_version('3.5.1')
+script_version('3.5.2')
 
 local imgui    = require 'mimgui'
 local encoding = require 'encoding'
@@ -1495,39 +1495,66 @@ imgui.OnInitialize(function()
 end)
 
 -- ============================================================ AUTO-UPDATE (GitHub)
-local UPDATE_URL = 'https://raw.githubusercontent.com/denismaslov769-lab/rage-mod/main/rage-mod.lua'
+-- raw.githubusercontent.com/.../main/ кэшируется CDN ~5 минут и отдаёт старую версию,
+-- поэтому сначала берём SHA последнего коммита через API, а файл качаем по этому SHA
+-- (такая ссылка всегда указывает ровно на нужную версию — кэш не мешает).
+local GH_REPO = 'denismaslov769-lab/rage-mod'
+local GH_FILE = 'rage-mod.lua'
+local GH_BRANCH = 'main'
 
 local function verNum(v)
     local a, b, c = tostring(v or ''):match('(%d+)%.?(%d*)%.?(%d*)')
     return (tonumber(a) or 0) * 1000000 + (tonumber(b) or 0) * 1000 + (tonumber(c) or 0)
 end
 
-local function checkUpdate(manual)
+-- скачать url во временный файл и вернуть содержимое в cb(text|nil)
+local function fetch(url, cb)
     local dl = require('moonloader').download_status
     local tmp = getWorkingDirectory() .. '\\rage-mod.update.tmp'
-    downloadUrlToFile(UPDATE_URL .. '?t=' .. os.time(), tmp, function(_, status)
-        if status ~= dl.STATUS_ENDDOWNLOADDATA then return end
+    os.remove(tmp)
+    local done = false
+    -- ?t= — обходим кэш Windows (URLDownloadToFile кэширует ответы)
+    local sep = url:find('?', 1, true) and '&' or '?'
+    downloadUrlToFile(url .. sep .. 't=' .. os.time() .. math.random(1000, 9999), tmp, function(_, status)
+        if done or status ~= dl.STATUS_ENDDOWNLOADDATA then return end
+        done = true
         lua_thread.create(function()
             wait(100)
             local f = io.open(tmp, 'rb')
-            if not f then if manual then chat('обновление: не удалось скачать') end return end
-            local code = f:read('*a'); f:close(); os.remove(tmp)
-            local remote = code:match("script_version%('([^']+)'%)")
-            if not remote or #code < 10000 then
-                if manual then chat('обновление: GitHub вернул не скрипт (репозиторий приватный?)') end
-                return
-            end
-            if verNum(remote) <= verNum(thisScript().version) then
-                if manual then chat('у вас последняя версия {4E83FF}v' .. thisScript().version) end
-                return
-            end
-            local out = io.open(thisScript().path, 'wb')
-            if not out then chat('{E03D3D}обновление: нет доступа к файлу скрипта') return end
-            out:write(code); out:close()
-            chat('обновлено до {3DE07A}v' .. remote .. '{FFFFFF}, перезагружаюсь...')
-            saveConfig()
-            wait(300)
-            thisScript():reload()
+            local text = f and f:read('*a') or nil
+            if f then f:close() end
+            os.remove(tmp)
+            cb(text)
+        end)
+    end)
+end
+
+local function installUpdate(code, manual)
+    local remote = code and code:match("script_version%('([^']+)'%)")
+    if not remote or #code < 10000 then
+        if manual then chat('обновление: GitHub вернул не скрипт (репозиторий приватный?)') end
+        return
+    end
+    if verNum(remote) <= verNum(thisScript().version) then
+        if manual then chat('у вас последняя версия {4E83FF}v' .. thisScript().version) end
+        return
+    end
+    local out = io.open(thisScript().path, 'wb')
+    if not out then chat('{E03D3D}обновление: нет доступа к файлу скрипта') return end
+    out:write(code); out:close()
+    chat('обновлено до {3DE07A}v' .. remote .. '{FFFFFF}, перезагружаюсь...')
+    saveConfig()
+    wait(300)
+    thisScript():reload()
+end
+
+local function checkUpdate(manual)
+    if manual then chat('проверяю обновления...') end
+    fetch('https://api.github.com/repos/' .. GH_REPO .. '/commits/' .. GH_BRANCH, function(json)
+        local sha = json and json:match('"sha"%s*:%s*"(%x+)"')
+        local ref = sha or GH_BRANCH     -- API недоступно (лимит) — пробуем ветку напрямую
+        fetch('https://raw.githubusercontent.com/' .. GH_REPO .. '/' .. ref .. '/' .. GH_FILE, function(code)
+            installUpdate(code, manual)
         end)
     end)
 end
