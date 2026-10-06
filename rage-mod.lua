@@ -20,7 +20,7 @@
 
 script_name('rage-mod')
 script_author('rage-mod')
-script_version('4.8.0')
+script_version('4.8.1')
 
 local imgui    = require 'mimgui'
 local encoding = require 'encoding'
@@ -250,6 +250,9 @@ local RU = {
     ['On Release'] = 'При отпускании', ['Shot or Release'] = 'Выстрел или отпускание', ['Method'] = 'Способ',
     ['Run Back'] = 'Бегом', ['Teleport'] = 'Телепорт', ['Return Speed'] = 'Скорость возврата',
     ['Show Position'] = 'Показывать точку', ['Through Walls'] = 'Сквозь стены',
+    ['Jump Attack'] = 'Стрельба в прыжке', ['JUMP ATTACK'] = 'СТРЕЛЬБА В ПРЫЖКЕ', ['Fire From'] = 'Чем стрелять',
+    ['On Click'] = 'По клику (ЛКМ)', ['With Trigger Bot'] = 'Триггерботом', ['Click or Trigger'] = 'ЛКМ или триггер',
+    ['Need Target'] = 'Только при наличии цели', ['Fire Rate'] = 'Скорострельность', ['Use Ammo'] = 'Тратить патроны',
     ['Log Events'] = 'Лог событий', ['Mode'] = 'Режим', ['Spin Speed'] = 'Скорость вращения',
     ['Jitter Range'] = 'Диапазон джиттера', ['Disable While Aiming'] = 'Откл. при прицеливании',
     ['Toggle Key'] = 'Клавиша', ['Show Locally'] = 'Показывать у себя', ['Force Sync'] = 'Частая синхронизация',
@@ -1046,6 +1049,14 @@ VIS.SUB_QP = { title = 'QUICK PEEK ASSIST', rows = CARD('qp', {
     SL('Return Speed', 5, 25, 12, '%d', false, 'qp_speed'),
     COL('Show Position', true, { 102, 124, 246 }, 'qp_show'),
 }) }
+-- Jump Attack: в прыжке игра стрелять не даёт — выстрел (bullet sync + урон) отправляет скрипт
+VIS.SUB_JA = { title = 'JUMP ATTACK', rows = CARD('ja', {
+    T_('Enabled', false, 'ja_on'),
+    SEL('Fire From', { 'On Click', 'With Trigger Bot', 'Click or Trigger' }, 2, 'ja_src'),
+    T_('Need Target', true, 'ja_need'),
+    SL('Fire Rate', 50, 200, 100, '%d%%', false, 'ja_rate'),
+    T_('Use Ammo', true, 'ja_ammo'),
+}) }
 local ROWS = {
     rage_main = CARD('rage_main', {
         T_('Enabled'), T_('Silent Aim', true), CH('Trigger Bot', VIS.SUB_TB), T_('Aim Through Walls', true),
@@ -1119,7 +1130,7 @@ local ROWS = {
         T_('Strafe Assist'), T_('Edge Jump'), T_('Slow Walk'), T_('Fast Ladder'),
     }),
     m_feat = CARD('m_feat', {
-        T_('Quick Switch'), DIS('Super Toss'), DIS('Knife Bot'), T_('Prevent AFK Kick'), T_('Hit Sound'),
+        T_('Quick Switch'), CH('Jump Attack', VIS.SUB_JA), DIS('Knife Bot'), T_('Prevent AFK Kick'), T_('Hit Sound'),
         DIS('Automatic Purchase'), DIS('Automatic Grenade Release'), DIS('Auto-Accept Matchmaking'),
         MUL('Log Events', { 'Damage Dealt', 'Damage Taken', 'Purchases', 'Deaths' }, 0x00),
     }),
@@ -2713,11 +2724,98 @@ function RG.qpDraw(dl)
     end
 end
 
--- каждый кадр: Trigger Bot / Quick Peek / Quick Scope / Quick Stop
+-- ---------- JUMP ATTACK ----------
+-- интервал между выстрелами (с) по оружию
+RG.JA_RATE = { [22] = 0.25, [23] = 0.4, [24] = 0.8, [25] = 1.0, [26] = 0.3, [27] = 0.35, [28] = 0.07, [29] = 0.09,
+               [30] = 0.11, [31] = 0.11, [32] = 0.07, [33] = 1.0, [34] = 1.2, [38] = 0.03 }
+RG.ja = { lastT = 0, sending = false, warned = false }
+-- отправить bullet sync (пакет 206) вручную
+function RG.jaSendBullet(d)
+    local bs = raknetNewBitStream()
+    raknetBitStreamWriteInt8(bs, 206)
+    raknetBitStreamWriteInt8(bs, d.targetType)
+    raknetBitStreamWriteInt16(bs, d.targetId)
+    for _, v in ipairs({ d.origin, d.target, d.center }) do
+        raknetBitStreamWriteFloat(bs, v.x); raknetBitStreamWriteFloat(bs, v.y); raknetBitStreamWriteFloat(bs, v.z)
+    end
+    raknetBitStreamWriteInt8(bs, d.weaponId)
+    RG.ja.sending = true
+    local ok, e = pcall(raknetSendBitStream, bs)
+    RG.ja.sending = false
+    raknetDeleteBitStream(bs)
+    if not ok then error(e) end
+end
+function RG.jaTick(free)
+    local ja = RG.ja
+    if not O.ja_on or not free or not spawnedAt or os.clock() - spawnedAt < 5 then return end
+    if not isCharOnFoot(PLAYER_PED) or not isCharInAir(PLAYER_PED) or isCharInWater(PLAYER_PED) then return end
+    local w = getCurrentCharWeapon(PLAYER_PED)
+    local dmg = RG.DMG[w]
+    if not dmg then return end
+    local now = os.clock()
+    local src = O.ja_src or 2
+    local click = src ~= 1 and isKeyDown(0x01)
+    local trig = src ~= 0 and O.tb_on and now - RG.tb.fireT < 0.05
+    if not click and not trig then return end
+    if now - ja.lastT < (RG.JA_RATE[w] or 0.3) / ((O.ja_rate or 100) / 100) then return end
+    local ammo = getAmmoInCharWeapon(PLAYER_PED, w)
+    if O.ja_ammo and ammo <= 0 then return end
+    -- цель: триггер -> сайлент/рейдж -> никакой (пуля в прицел)
+    local t = trig and RG.tbShotTarget() or nil
+    if not t then
+        local tf = O.tb_on and RG.tbFind(w) or nil
+        if tf then
+            RG.tb.id, RG.tb.hb, RG.tb.fireT = tf.id, tf.hb, now
+            t = RG.tbShotTarget()
+        end
+    end
+    if not t and RG.on() then t = RG.find(w, false) end
+    if not t and O.ja_need then return end
+    local x, y, z = getCharCoordinates(PLAYER_PED)
+    local d = { origin = { x = x, y = y, z = z + 0.55 }, weaponId = w, targetId = 65535, targetType = 0 }
+    if t then
+        d.targetType, d.targetId = 1, t.id
+        d.target = { x = t.x, y = t.y, z = t.z }
+        d.center = { x = t.x - t.px, y = t.y - t.py, z = t.z - t.pz }
+    else
+        local cx, cy, cz, fx, fy, fz = RG.cam()
+        local ok, cp = processLineOfSight(cx, cy, cz, cx + fx * 300, cy + fy * 300, cz + fz * 300, true, true, false, true, false, false, false, false)
+        local tx, ty, tz = cx + fx * 300, cy + fy * 300, cz + fz * 300
+        if ok and cp and cp.pos then tx, ty, tz = cp.pos[1], cp.pos[2], cp.pos[3] end
+        d.target, d.center = { x = tx, y = ty, z = tz }, { x = 0, y = 0, z = 0 }
+    end
+    ja.lastT = now
+    local okb, eb = pcall(RG.jaSendBullet, d)
+    if not okb then
+        TR.T('ja.err ' .. tostring(eb))
+        if not ja.warned then ja.warned = true; chat('Jump Attack: не удалось отправить выстрел (нужен SAMPFUNCS)') end
+        return
+    end
+    if O.ja_ammo then pcall(setCharAmmo, PLAYER_PED, w, ammo - 1) end
+    RG.qp.shotT = now
+    pcall(VIS.ownShot, d)
+    TR.T('ja.shot ' .. tostring(d.targetId))
+    if t then
+        local id, bp = t.id, t.bp
+        if bit.band(O.m_feat_log_events or 0, 1) ~= 0 then
+            local okn, nm = pcall(sampGetPlayerNickname, id)
+            chat(('jump {3DE07A}%.1f{FFFFFF} -> %s[%d]'):format(dmg, okn and nm or '?', id))
+        end
+        lua_thread.create(function()
+            if not sampIsPlayerConnected(id) then return end
+            sampSendGiveDamage(id, dmg, w, bp)
+            if RG.on() and O.rage_other_double_tap then wait(60); sampSendGiveDamage(id, dmg, w, bp) end
+        end)
+    end
+end
+
+-- каждый кадр: Trigger Bot / Quick Peek / Jump Attack / Quick Scope / Quick Stop
 function RG.tick(free)
     pcall(RG.qpTick, free)
     local okt, et = pcall(RG.tbTick, free)
     if not okt then TR.T('tb.err ' .. tostring(et)) end
+    local okj, ej = pcall(RG.jaTick, free)
+    if not okj then TR.T('ja.err ' .. tostring(ej)) end
     if not RG.on() or not free or not spawnedAt or os.clock() - spawnedAt < 5 then return end
     if not isCharOnFoot(PLAYER_PED) then return end
     local w = getCurrentCharWeapon(PLAYER_PED)
@@ -4372,7 +4470,7 @@ function VIS.drawHud(dl, sw, sh, now)
         local act = {}
         local function add(on, n) if on then act[#act + 1] = n end end
         add(RG.on(), 'Rage Aimbot'); add(RG.on() and O.rage_main_silent_aim, 'Silent Aim')
-        add(O.tb_on, 'Trigger Bot'); add(O.qp_on and RG.qp.active, 'Quick Peek'); add(RG.on() and O.rage_other_double_tap, 'Double Tap'); add(O.mb_on, 'Magic Bullet')
+        add(O.tb_on, 'Trigger Bot'); add(O.ja_on, 'Jump Attack'); add(O.qp_on and RG.qp.active, 'Quick Peek'); add(RG.on() and O.rage_other_double_tap, 'Double Tap'); add(O.mb_on, 'Magic Bullet')
         add(O.aa_enable, 'Anti-Aim'); add(O.m_move_bunny_hop, 'Bunny Hop'); add(O.m_move_air_strafe, 'Air Strafe')
         add(O.m_move_slow_walk, 'Slow Walk'); add(O.v_nv, 'Night Vision'); add(O.v_ir, 'Thermal')
         if #act > 0 then
@@ -4491,6 +4589,7 @@ local QS_WEAPONS = { [24] = true, [25] = true, [27] = false, [33] = true, [34] =
 local qsPending, qsBusy = false, false
 
 function sampev.onSendBulletSync(data)
+    if RG.ja.sending then return end      -- выстрел Jump Attack уже собран и доведён
     TR.T('bulletsync')
     pcall(RG.onBullet, data)
     pcall(VIS.btShot, data)
