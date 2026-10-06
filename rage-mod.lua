@@ -20,7 +20,7 @@
 
 script_name('rage-mod')
 script_author('rage-mod')
-script_version('3.8.0')
+script_version('3.8.1')
 
 local imgui    = require 'mimgui'
 local encoding = require 'encoding'
@@ -1769,30 +1769,51 @@ local function installUpdate(code, manual)
     local out = io.open(thisScript().path, 'wb')
     if not out then chat('{E03D3D}обновление: нет доступа к файлу скрипта') return end
     out:write(code); out:close()
-    chat('обновлено до {3DE07A}v' .. remote .. '{FFFFFF}, перезагружаюсь...')
-    saveConfig()
-    wait(300)
-    thisScript():reload()
+    return remote
 end
 
-local function checkUpdate(manual)
+-- cb(newVersion|nil) вызывается один раз, когда проверка закончена
+local function checkUpdate(manual, cb)
     if manual then chat('проверяю обновления...') end
     fetch('https://api.github.com/repos/' .. GH_REPO .. '/commits/' .. GH_BRANCH, function(json)
         local sha = json and json:match('"sha"%s*:%s*"(%x+)"')
         local ref = sha or GH_BRANCH     -- API недоступно (лимит) — пробуем ветку напрямую
         fetch('https://raw.githubusercontent.com/' .. GH_REPO .. '/' .. ref .. '/' .. GH_FILE, function(code)
-            installUpdate(code, manual)
+            local v = installUpdate(code, manual)
+            if cb then cb(v) end
         end)
     end)
+end
+
+-- Обновление на старте: проверяем ДО инициализации (иконки, хуки ввода, патчи памяти, мимгуи-рендер).
+-- Перезагрузка «на горячую» посреди игры роняла GTA, поэтому:
+--   * на старте — ждём результат и, если обновились, перезагружаемся, пока скрипт ещё ничего не трогал;
+--   * /ragemd_update в игре — только скачивает, новая версия включится при следующем запуске.
+local function startupUpdate()
+    local result, finished = nil, false
+    checkUpdate(false, function(v) result, finished = v, true end)
+    local t0 = os.clock()
+    while not finished and os.clock() - t0 < 8 do wait(100) end
+    if result then
+        chat('обновлено до {3DE07A}v' .. result .. '{FFFFFF}, перезагружаюсь...')
+        wait(1500)               -- даём загрузчику полностью закрыть соединения
+        thisScript():reload()
+        return true
+    end
+    return false
 end
 
 function main()
     if not isSampLoaded() or not isSampfuncsLoaded() then return end
     while not isSampAvailable() do wait(100) end
+    if startupUpdate() then return end
     loadConfig()
     sampRegisterChatCommand('ragemd', toggleMenu)
-    sampRegisterChatCommand('ragemd_update', function() checkUpdate(true) end)
-    checkUpdate(false)
+    sampRegisterChatCommand('ragemd_update', function()
+        checkUpdate(true, function(v)
+            if v then chat('скачана {3DE07A}v' .. v .. '{FFFFFF} — включится после перезапуска игры (или Ctrl+R)') end
+        end)
+    end)
     refreshWeaponIcons(true)
     chat('загружен. Меню: {4E83FF}/ragemd')
 
