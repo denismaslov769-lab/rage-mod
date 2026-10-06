@@ -20,7 +20,7 @@
 
 script_name('rage-mod')
 script_author('rage-mod')
-script_version('3.5.0')
+script_version('3.5.1')
 
 local imgui    = require 'mimgui'
 local encoding = require 'encoding'
@@ -1376,8 +1376,9 @@ local function aaMoveTick(free)
     -- ввод игрока (читаем ДО обнуления)
     local lx, ly = getPositionOfAnalogueSticks(0)
     if not free then lx, ly = 0, 0 end
-    local jumpDown = free and isButtonPressed(PLAYER_HANDLE, BTN_JUMP)
-    local sprint = free and isButtonPressed(PLAYER_HANDLE, BTN_SPRINT)
+    -- прыжок: пробел ИЛИ игровая кнопка прыжка; спринт: игровая кнопка спринта ИЛИ Shift
+    local jumpDown = free and (isKeyDown(0x20) or isButtonPressed(PLAYER_HANDLE, BTN_JUMP))
+    local sprint = free and (isButtonPressed(PLAYER_HANDLE, BTN_SPRINT) or isKeyDown(0xA0))
     local walk = free and isKeyDown(0x12)
 
     -- игре движение и прыжок не даём
@@ -1401,12 +1402,21 @@ local function aaMoveTick(free)
     -- прыжок: по нажатию, только с земли
     if jumpDown and not aaJumpHeld and not inAir and now - aaJumpT > 0.35 then
         aaJumpT = now
+        -- чуть приподнимаем педа, чтобы игра сняла флаг «стоит на земле» и не обнулила скорость
+        local p = pedPos()
+        if p then p[2] = p[2] + 0.15 end
         setCharVelocity(PLAYER_PED, dx * speed, dy * speed, AA_JUMP_VZ)
         aaPos = nil
         aaJumpHeld = jumpDown
         return
     end
     aaJumpHeld = jumpDown
+    -- первые кадры прыжка игра может гасить вертикальную скорость — дожимаем, пока не оторвались
+    if not inAir and now - aaJumpT < 0.15 then
+        setCharVelocity(PLAYER_PED, dx * speed, dy * speed, AA_JUMP_VZ)
+        aaPos = nil
+        return
+    end
 
     if inAir or now - aaJumpT < 0.15 then
         -- в воздухе физика работает со скоростью — управляем ей (без ввода сохраняем инерцию)
