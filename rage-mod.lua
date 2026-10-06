@@ -20,7 +20,7 @@
 
 script_name('rage-mod')
 script_author('rage-mod')
-script_version('4.7.0')
+script_version('4.7.1')
 
 local imgui    = require 'mimgui'
 local encoding = require 'encoding'
@@ -1004,6 +1004,7 @@ VIS.SUB_BT = { title = 'BACKTRACK', rows = CARD('bt', {
 -- Magic Bullet: промах по игроку -> попадание в ближайшего к прицелу, даже за стеной, в случайную кость
 VIS.SUB_MB = { title = 'MAGIC BULLET', rows = CARD('mb', {
     T_('Enabled', false, 'mb_on'),
+    SEL('Mode', { 'Behind Walls', 'Always', 'Visible Only' }, 1, 'mb_mode'),
     SL('Field of View', 1, 180, 25, '%.1f°', true, 'mb_fov'),
     SL('Max Distance', 10, 300, 150, '%d m', false, 'mb_dist'),
     SL('Hit Chance', 0, 100, 100, '%d%%', false, 'mb_hc'),
@@ -2349,6 +2350,7 @@ RG.MB_BONES = {
 function RG.mbFind()
     local cx, cy, cz, fx, fy, fz = RG.cam()
     local fov, maxd = O.mb_fov or 25, O.mb_dist or 150
+    local mode = O.mb_mode or 1
     local myId = RG.myId()
     local okc, myCol = pcall(sampGetPlayerColor, myId)
     local best, bestAng = nil, math.huge
@@ -2369,7 +2371,13 @@ function RG.mbFind()
                     if dist > 0.5 and dist <= maxd then
                         local dot = (dx * fx + dy * fy + dz * fz) / dist
                         local ang = math.deg(math.acos(math.max(-1, math.min(1, dot))))
-                        if ang <= fov and ang < bestAng then
+                        -- режим: 0 — только за стеной, 1 — всегда, 2 — только видимые
+                        local okMode = mode == 1
+                        if not okMode and ang <= fov and ang < bestAng then
+                            local los = isLineOfSightClear(cx, cy, cz, x, y, z + 0.6, true, false, false, true, false)
+                            okMode = (mode == 0 and not los) or (mode == 2 and los)
+                        end
+                        if okMode and ang <= fov and ang < bestAng then
                             bestAng = ang
                             best = { id = id, ped = ped, px = x, py = y, pz = z }
                         end
@@ -2418,6 +2426,7 @@ end
 function RG.onBullet(data)
     -- сайлент выключен — работает только Magic Bullet (если включён)
     if not RG.on() or not O.rage_main_silent_aim or not spawnedAt then RG.magic(data); return end
+    if (O.mb_mode or 1) ~= 0 and RG.magic(data) then return end
     local w = getCurrentCharWeapon(PLAYER_PED)
     local dmg = RG.DMG[w]
     if not dmg then return end
@@ -2500,7 +2509,7 @@ end
 VIS.list, VIS.tr, VIS.hits, VIS.souls, VIS.los, VIS.alive, VIS.shot = {}, {}, {}, {}, {}, {}, {}
 VIS.drawTr, VIS.drawHits, VIS.drawSouls, VIS.veh, VIS.pk, VIS.obj, VIS.act = {}, {}, {}, {}, {}, {}, {}
 VIS.active, VIS.sw, VIS.sh, VIS.st, VIS.cc, VIS.lastHit, VIS.dims = false, 1920, 1080, {}, {}, {}, {}
-VIS.ch = { orig = {}, gflag = {}, last = 0, dirty = false }
+VIS.ch = { orig = {}, gflag = {}, last = 0, dirty = false, painted = {} }
 VIS.LINKS = { { 8, 5 }, { 5, 4 }, { 4, 3 }, { 3, 2 }, { 5, 22 }, { 22, 23 }, { 23, 24 }, { 24, 25 }, { 5, 32 }, { 32, 33 },
     { 33, 34 }, { 34, 35 }, { 2, 51 }, { 51, 52 }, { 52, 53 }, { 53, 54 }, { 2, 41 }, { 41, 42 }, { 42, 43 }, { 43, 44 } }
 VIS.BONE_IDS = { 2, 3, 4, 5, 8, 22, 23, 24, 25, 32, 33, 34, 35, 41, 42, 43, 44, 51, 52, 53, 54 }
@@ -2787,23 +2796,34 @@ function VIS.paintPed(ped, s, now, hp)
         local c = ffi.cast('uint8_t*', mat + 4)
         local tex = ffi.cast('uint32_t*', mat)
         local sp = ffi.cast('float*', mat + 0x0C)
+        local gf = ffi.cast('uint32_t*', g + 8)
+        local o = ch.orig[mat]
+        -- материал пересоздан (скин выгрузился/перезагрузился после смерти, стрима и т.п.):
+        -- в памяти уже не то, что мы писали — старый «оригинал» невалиден (висячая текстура -> невидимая модель)
+        if o and (tex[0] ~= o.wtex or c[0] ~= o.w[1] or c[1] ~= o.w[2] or c[2] ~= o.w[3] or c[3] ~= o.w[4]) then
+            ch.orig[mat] = nil; o = nil
+        end
+        local f = ch.gflag[g]
+        if f and gf[0] ~= f.w then ch.gflag[g] = nil; f = nil end
         if mode == 0 then
-            local o = ch.orig[mat]
             if o then
                 c[0], c[1], c[2], c[3] = o[1], o[2], o[3], o[4]
                 tex[0] = o.tex; sp[0], sp[1], sp[2] = o.a, o.s, o.d
                 ch.orig[mat] = nil
             end
-            local f = ch.gflag[g]
-            if f then ffi.cast('uint32_t*', g + 8)[0] = f; ch.gflag[g] = nil end
+            if f then gf[0] = f.o; ch.gflag[g] = nil end
             return
         end
-        if not ch.orig[mat] then ch.orig[mat] = { c[0], c[1], c[2], c[3], tex = tex[0], a = sp[0], s = sp[1], d = sp[2] } end
-        if not ch.gflag[g] then ch.gflag[g] = ffi.cast('uint32_t*', g + 8)[0] end
-        local o = ch.orig[mat]
-        ffi.cast('uint32_t*', g + 8)[0] = bit.bor(ch.gflag[g], 0x40)
+        if not o then
+            o = { c[0], c[1], c[2], c[3], tex = tex[0], a = sp[0], s = sp[1], d = sp[2], w = {} }
+            ch.orig[mat] = o
+        end
+        if not f then f = { o = gf[0] }; ch.gflag[g] = f end
+        gf[0] = bit.bor(f.o, 0x40)
+        f.w = gf[0]                       -- читаем обратно: bit.bor даёт signed int32, а поле uint32
         c[0], c[1], c[2], c[3] = VIS.chamsColor(s, now, mi, mn, hp)
         tex[0] = notex and 0 or o.tex
+        o.wtex, o.w[1], o.w[2], o.w[3], o.w[4] = tex[0], c[0], c[1], c[2], c[3]
         if lt then sp[0], sp[1], sp[2] = lt[1], lt[2], lt[3] else sp[0], sp[1], sp[2] = o.a, o.s, o.d end
         mi = mi + 1
     end)
@@ -2819,6 +2839,7 @@ function VIS.restoreAll()
     end
     if doesCharExist(PLAYER_PED) then pcall(VIS.paintPed, PLAYER_PED, nil) end
     VIS.ch.orig, VIS.ch.gflag, VIS.ch.dirty, VIS.localPainted = {}, {}, false, false
+    VIS.ch.painted = {}
 end
 function VIS.chamsTick(ready, now)
     local sV, sH, sS = VIS.chGet(VIS.SUB_CH_VIS), VIS.chGet(VIS.SUB_CH_HID), VIS.chGet(VIS.SUB_CH_SHOT)
@@ -2837,6 +2858,17 @@ function VIS.chamsTick(ready, now)
     end
     if not O.pl_enemy_enabled then return end
     local myModel = getCharModel(PLAYER_PED)
+    -- враги, выпавшие из списка (умер, далеко, стрим-аут): откатываем их модель, иначе
+    -- на респавне/перестриме остаётся мусор и чамсы «пропадают»
+    VIS.ch.painted = VIS.ch.painted or {}
+    local inList = {}
+    for _, e in ipairs(VIS.list) do inList[e.ped] = true end
+    for ped, pm in pairs(VIS.ch.painted) do
+        if not inList[ped] then
+            if doesCharExist(ped) and getCharModel(ped) == pm then pcall(VIS.paintPed, ped, nil) end
+            VIS.ch.painted[ped] = nil
+        end
+    end
     for _, e in ipairs(VIS.list) do
         if doesCharExist(e.ped) then
             local s = sV
@@ -2849,7 +2881,8 @@ function VIS.chamsTick(ready, now)
             if e.sameSkin and (not O.chm_same or sL.mode > 0) then s = nil end
             if s and s.mode > 0 then VIS.ch.dirty = true else s = nil end
             if not (e.sameSkin and sL.mode > 0) then
-                pcall(VIS.paintPed, e.ped, s, now, e.hp or sampGetPlayerHealth(e.id))
+                local okp = pcall(VIS.paintPed, e.ped, s, now, e.hp or sampGetPlayerHealth(e.id))
+                if okp and s then VIS.ch.painted[e.ped] = getCharModel(e.ped) else VIS.ch.painted[e.ped] = nil end
             end
         end
     end
@@ -3129,7 +3162,10 @@ function VIS.collectPlayers(now, cx, cy, cz, fx, fy)
             local ok, ped = sampGetCharHandleBySampPlayerId(id)
             if ok and doesCharExist(ped) then
                 local x, y, z = getCharCoordinates(ped)
-                local dead = isCharDead(ped) or sampGetPlayerHealth(id) <= 0
+                -- sampGetPlayerHealth может «залипнуть» на 0 после убийства/Magic Bullet,
+                -- поэтому мёртвым считаем только реально мёртвого педа
+                local okh, gh = pcall(getCharHealth, ped)
+                local dead = isCharDead(ped) or (okh and gh <= 0 and sampGetPlayerHealth(id) <= 0)
                 if VIS.alive[id] and dead then
                     if O.pl_model_soul_particles then VIS.souls[#VIS.souls + 1] = { x, y, z, now, seed = math.random() * 10 } end
                     if O.sc_kill and VIS.lastHit[id] and now - VIS.lastHit[id] < 3 then
@@ -3164,7 +3200,9 @@ function VIS.collectPlayers(now, cx, cy, cz, fx, fy)
                             local okn, nm = pcall(sampGetPlayerNickname, id)
                             e.name = (okn and nm) and u8(nm) or '?'
                             e.r, e.g, e.b = bit.band(bit.rshift(pc, 16), 255), bit.band(bit.rshift(pc, 8), 255), bit.band(pc, 255)
-                            e.hp = math.max(0, math.min(100, sampGetPlayerHealth(id)))
+                            local shp = sampGetPlayerHealth(id)
+                            if shp <= 0 and okh then shp = gh end
+                            e.hp = math.max(0, math.min(100, shp))
                             e.ar = math.max(0, math.min(100, sampGetPlayerArmor(id)))
                             e.wid = getCurrentCharWeapon(ped)
                             local vx, vy, vz = getCharVelocity(ped)
@@ -3568,11 +3606,13 @@ function VIS.tick(ready)
     fx, fy = fx / fl, fy / fl
     if ready and O.pl_enemy_enabled then
         TR.T('vis.collect')
-        VIS.list = VIS.collectPlayers(now, cx, cy, cz, fx, fy)
+        local okl, lst = pcall(VIS.collectPlayers, now, cx, cy, cz, fx, fy)
+        if okl then VIS.list = lst else TR.T('vis.collect.err ' .. tostring(lst)) end
     else VIS.list = {} end
     if ready then
         TR.T('vis.world')
-        VIS.collectWorld(now, cx, cy, cz)
+        local okw, ew = pcall(VIS.collectWorld, now, cx, cy, cz)
+        if not okw then TR.T('vis.world.err ' .. tostring(ew)) end
     else VIS.veh, VIS.pk, VIS.obj, VIS.act = {}, {}, {}, {} end
 
     -- HUD-данные
@@ -3653,7 +3693,8 @@ function VIS.tick(ready)
     pcall(VIS.btProject, now)
     if ready then pcall(VIS.hatTick, cx, cy, cz) else VIS.hat = nil end
     VIS.active = true
-    VIS.chamsTick(ready, now)
+    local okc, ec = pcall(VIS.chamsTick, ready, now)
+    if not okc then TR.T('vis.chams.err ' .. tostring(ec)) end
 end
 
 -- ============================================================ отрисовка
@@ -4137,6 +4178,18 @@ imgui.OnFrame(function() return VIS.active end, function(self)
             local last = t.pts[#t.pts]
             if style == 2 and last then dl:AddCircleFilled(V(last[1], last[2]), wd + 2, VIS.C(c, 200 * a), 12) end
         end
+        pcall(VIS.drawHitsSouls, dl)
+        pcall(VIS.drawWorld, dl)
+        pcall(VIS.drawGhosts, dl)
+        for _, e in ipairs(VIS.list) do pcall(VIS.drawPlayer, dl, e, sw, sh, now) end
+        gA = 1
+    end
+    pcall(VIS.drawHud, dl, sw, sh, now)
+    gA = saveA
+end)
+
+function VIS.drawHitsSouls(dl)
+    gA = 1
         local ic = VIS.rgb('w_misc_bullet_impacts')
         local hc, dc = VIS.rgb('hm_c'), VIS.rgb('hm_dmg_c')
         local hs = O.hm_style or 0
@@ -4166,14 +4219,7 @@ imgui.OnFrame(function() return VIS.active end, function(self)
             dl:AddCircleFilled(V(p[1], p[2]), 5, VIS.C(soc, 40 * p[3]), 12)
             dl:AddCircleFilled(V(p[1], p[2]), 2, C(255, 255, 255, 220 * p[3]), 8)
         end
-        pcall(VIS.drawWorld, dl)
-        pcall(VIS.drawGhosts, dl)
-        for _, e in ipairs(VIS.list) do pcall(VIS.drawPlayer, dl, e, sw, sh, now) end
-        gA = 1
-    end
-    pcall(VIS.drawHud, dl, sw, sh, now)
-    gA = saveA
-end)
+end
 
 -- ============================================================ MISC: FEATURES
 local memory = require 'memory'
@@ -4393,7 +4439,11 @@ function main()
         mvTick(free, I)
         if ready then qsTick(); RG.tick(free) end
         local okv, ev = pcall(VIS.tick, ready)
-        if not okv then TR.T('vis.err ' .. tostring(ev)) end
+        if not okv then
+            TR.T('vis.err ' .. tostring(ev))
+            VIS.active = true
+            pcall(VIS.chamsTick, ready, os.clock())
+        end
         logTick()
         setAntiAfk(ready and O.m_feat_prevent_afk_kick)
         if os.clock() - lastIconCheck > 1.5 then
