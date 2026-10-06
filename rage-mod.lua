@@ -20,7 +20,7 @@
 
 script_name('rage-mod')
 script_author('rage-mod')
-script_version('4.8.22')
+script_version('4.8.23')
 
 local imgui    = require 'mimgui'
 local encoding = require 'encoding'
@@ -1086,6 +1086,19 @@ VIS.SUB_JA = { title = 'JUMP ATTACK', rows = CARD('ja', {
     T_('Own Jump', true, 'ja_ownjump'),
     T_('Use Ammo', true, 'ja_ammo'),
 }) }
+-- Clumsy: пока активен, твоя позиция другим не отправляется — для всех ты стоишь на месте,
+-- а сам бегаешь/стреляешь; при выключении позиция уходит разом и ты «тепаешься»
+VIS.SUB_CL = { title = 'CLUMSY', rows = CARD('cl', {
+    T_('Enabled', false, 'cl_on'),
+    SEL('Key', VIS.KEYS_N, 6, 'cl_key'),
+    SEL('Activation', { 'Hold', 'Toggle' }, 0, 'cl_act'),
+    SEL('Mode', { 'Freeze', 'Fake Lag' }, 0, 'cl_mode'),
+    SL('Lag Interval', 100, 1500, 500, '%d ms', false, 'cl_int'),
+    SL('Max Duration', 0, 30, 0, '%d s', false, 'cl_max'),
+    T_('Allow Shots', true, 'cl_shots'),
+    T_('Freeze Aim', true, 'cl_aim'),
+    COL('Show Position', true, { 255, 90, 120 }, 'cl_show'),
+}) }
 -- Auto +C: после выстрела сам жмёт C (присед) — сбивает анимацию отдачи, и сразу встаёт обратно
 VIS.SUB_PC = { title = 'AUTO +C', rows = CARD('pc', {
     T_('Enabled', false, 'pc_on'),
@@ -1170,7 +1183,7 @@ local ROWS = {
         T_('Strafe Assist'), T_('Edge Jump'), T_('Slow Walk'), T_('Fast Ladder'),
     }),
     m_feat = CARD('m_feat', {
-        T_('Quick Switch'), CH('Jump Attack', VIS.SUB_JA), CH('Auto +C', VIS.SUB_PC), T_('Prevent AFK Kick'), T_('Hit Sound'),
+        T_('Quick Switch'), CH('Jump Attack', VIS.SUB_JA), CH('Auto +C', VIS.SUB_PC), CH('Clumsy', VIS.SUB_CL), T_('Prevent AFK Kick'), T_('Hit Sound'),
         DIS('Automatic Purchase'), DIS('Automatic Grenade Release'), DIS('Auto-Accept Matchmaking'),
         MUL('Log Events', { 'Damage Dealt', 'Damage Taken', 'Purchases', 'Deaths' }, 0x00),
     }),
@@ -3206,7 +3219,97 @@ function RG.pcTick(free)
 end
 
 -- каждый кадр: Trigger Bot / Quick Peek / Jump Attack / Quick Scope / Quick Stop
+-- ---------- CLUMSY ----------
+RG.cl = { on = false, t0 = 0, passT = 0, held = false, tog = false, wait = false, draw = nil }
+function RG.clStop()
+    local c = RG.cl
+    if not c.on then return end
+    c.on = false
+    TR.E(('clumsy off %.1fs'):format(os.clock() - c.t0))
+    pcall(sampForceOnfootSync)          -- сразу отправляем настоящую позицию — «телепорт»
+    pcall(sampForceAimSync)
+end
+-- можно ли пропустить этот onfoot-синк (режим Fake Lag — раз в интервал)
+function RG.clPass()
+    local c = RG.cl
+    if (O.cl_mode or 0) ~= 1 then return false end
+    local now = os.clock()
+    if now - c.passT >= (O.cl_int or 500) / 1000 then
+        c.passT = now
+        c.x, c.y, c.z = getCharCoordinates(PLAYER_PED)
+        return true
+    end
+    return false
+end
+function RG.clTick(free)
+    local c = RG.cl
+    c.draw = nil
+    if not O.cl_on or not spawnedAt or not doesCharExist(PLAYER_PED) or isCharDead(PLAYER_PED) then
+        c.tog, c.wait = false, false
+        RG.clStop(); return
+    end
+    local kc = VIS.KEYS_C[(O.cl_key or 6) + 1]
+    local down = free and kc and isKeyDown(kc) or false
+    local now = os.clock()
+    local want
+    if (O.cl_act or 0) == 1 then
+        if down and not c.held then c.tog = not c.tog end
+        want = c.tog
+    else
+        want = down
+        if not down then c.wait = false end
+    end
+    c.held = down
+    if want and not c.on and not c.wait then
+        c.on, c.t0, c.passT = true, now, now
+        c.x, c.y, c.z = getCharCoordinates(PLAYER_PED)
+        TR.E('clumsy on')
+    elseif not want and c.on then
+        RG.clStop()
+    end
+    if c.on and (O.cl_max or 0) > 0 and now - c.t0 > O.cl_max then
+        RG.clStop(); c.tog = false; c.wait = true
+    end
+    if c.on and O.cl_show and c.x then
+        local pts = {}
+        for i = 0, 23 do
+            local a = i / 24 * math.pi * 2
+            local sx, sy = VIS.proj(c.x + math.cos(a) * 0.5, c.y + math.sin(a) * 0.5, c.z - 0.95)
+            pts[#pts + 1] = sx and { sx, sy } or false
+        end
+        local hx, hy = VIS.proj(c.x, c.y, c.z + 1.1)
+        c.draw = { pts = pts, hx = hx, hy = hy, t = now - c.t0 }
+    end
+end
+function RG.clDraw(dl)
+    local d = RG.cl.draw
+    if not d then return end
+    local col = VIS.rgb('cl_show')
+    local pts = d.pts
+    for i = 1, #pts do
+        local a, b = pts[i], pts[i % #pts + 1]
+        if a and b then
+            dl:AddLine(V(a[1], a[2]), V(b[1], b[2]), VIS.C(col, 60), 5)
+            dl:AddLine(V(a[1], a[2]), V(b[1], b[2]), VIS.C(col, 230), 1.8)
+        end
+    end
+    if d.hx then dl:AddText(V(d.hx - 30, d.hy), VIS.C(col, 255), ('CLUMSY %.1fs'):format(d.t)) end
+end
+-- обёртки синков (снаружи всех остальных): блокируем позицию/прицел, пока Clumsy активен
+do
+    local oPS, oAS = sampev.onSendPlayerSync, sampev.onSendAimSync
+    function sampev.onSendPlayerSync(data)
+        if RG.cl.on and not RG.clPass() then return false end
+        if oPS then return oPS(data) end
+    end
+    function sampev.onSendAimSync(data)
+        if RG.cl.on and O.cl_aim ~= false and (O.cl_mode or 0) == 0 then return false end
+        if oAS then return oAS(data) end
+    end
+end
+
 function RG.tick(free)
+    pcall(RG.clTick, free)
     pcall(RG.qpTick, free)
     local okt, et = pcall(RG.tbTick, free)
     if not okt then TR.E('tb.err ' .. tostring(et)) end
@@ -4925,7 +5028,7 @@ imgui.OnFrame(function() return VIS.active end, function(self)
     local saveA = gA
     gA = 1
     pcall(VIS.drawScreenFx, dl, sw, sh, now)
-    if VIS.ready then pcall(VIS.drawHat, dl); pcall(RG.qpDraw, dl) end
+    if VIS.ready then pcall(VIS.drawHat, dl); pcall(RG.qpDraw, dl); pcall(RG.clDraw, dl) end
     if VIS.ready then
         local style, wd = O.trc_style or 1, O.trc_w or 1.6
         for _, t in ipairs(VIS.drawTr) do
@@ -5019,6 +5122,7 @@ local QS_WEAPONS = { [24] = true, [25] = true, [27] = false, [33] = true, [34] =
 local qsPending, qsBusy = false, false
 
 function sampev.onSendBulletSync(data)
+    if RG.cl.on and O.cl_shots == false then return false end   -- Clumsy без выстрелов
     if RG.ja.sending then return end      -- выстрел Jump Attack уже собран и доведён
     TR.E(('bullet w%d t%d air%s'):format(data.weaponId or -1, data.targetType or -1, tostring(isCharInAir(PLAYER_PED))))
     local okb, eb = pcall(RG.onBullet, data)
