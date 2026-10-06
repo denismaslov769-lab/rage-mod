@@ -20,7 +20,7 @@
 
 script_name('rage-mod')
 script_author('rage-mod')
-script_version('4.8.7')
+script_version('4.8.8')
 
 local imgui    = require 'mimgui'
 local encoding = require 'encoding'
@@ -260,7 +260,8 @@ local RU = {
     ['Run Back'] = 'Бегом', ['Teleport'] = 'Телепорт', ['Return Speed'] = 'Скорость возврата',
     ['Show Position'] = 'Показывать точку', ['Through Walls'] = 'Сквозь стены',
     ['Engine Shot (real)'] = 'Выстрел движком (настоящий)', ['Scripted Jump'] = 'Свой прыжок', ['Packet (fake)'] = 'Пакетом (фейк)',
-    ['Jump Power'] = 'Сила прыжка',
+    ['Jump Power'] = 'Сила прыжка', ['Rate Source'] = 'Темп стрельбы', ['Game (mods)'] = 'Как в игре (с модами)',
+    ['Script'] = 'Скрипт (ползунок)', ['Own Jump'] = 'Свой прыжок с оружием',
     ['Jump Attack'] = 'Стрельба в прыжке', ['JUMP ATTACK'] = 'СТРЕЛЬБА В ПРЫЖКЕ', ['Fire From'] = 'Чем стрелять',
     ['On Click'] = 'По клику (ЛКМ)', ['With Trigger Bot'] = 'Триггерботом', ['Click or Trigger'] = 'ЛКМ или триггер',
     ['Need Target'] = 'Только при наличии цели', ['Fire Rate'] = 'Скорострельность', ['Use Ammo'] = 'Тратить патроны',
@@ -1067,7 +1068,9 @@ VIS.SUB_JA = { title = 'JUMP ATTACK', rows = CARD('ja', {
     SL('Jump Power', 3, 9, 5.5, '%.1f', true, 'ja_power'),
     SEL('Fire From', { 'On Click', 'With Trigger Bot', 'Click or Trigger' }, 2, 'ja_src'),
     T_('Need Target', true, 'ja_need'),
+    SEL('Rate Source', { 'Game (mods)', 'Script' }, 0, 'ja_rsrc'),
     SL('Fire Rate', 50, 200, 100, '%d%%', false, 'ja_rate'),
+    T_('Own Jump', true, 'ja_ownjump'),
     T_('Use Ammo', true, 'ja_ammo'),
 }) }
 local ROWS = {
@@ -2776,6 +2779,22 @@ end
 -- Повторный вход в Lua из FFI-вызова LuaJIT не поддерживает: состояние VM портилось,
 -- и после нескольких выстрелов ломались сайлент и вся стрельба. Из callMethod повторный вход разрешён.
 RG.jaBuf = ffi.new('float[6]')
+-- CWeapon активного слота: int32[0]=тип, [1]=состояние, [2]=патроны в обойме, [3]=всего, [4]=таймер (мс)
+function RG.jaWeapon()
+    local ped = getCharPointer(PLAYER_PED)
+    if not ped or ped == 0 then return nil end
+    local slot = ffi.cast('uint8_t*', ped + 0x718)[0]
+    return ffi.cast('int32_t*', ped + 0x5A0 + slot * 0x1C), ped
+end
+-- можно ли стрелять по темпу самой игры: таймер оружия, который выставляет CWeapon::Fire из CWeaponInfo.
+-- Рапид-фаер и прочие моды меняют именно это (инфо оружия / таймер / состояние) — так они работают и в прыжке.
+function RG.jaGameReady()
+    local wt = RG.jaWeapon()
+    if not wt then return false end
+    if wt[1] == 2 or wt[2] <= 0 then return false end
+    local nowMs = ffi.cast('uint32_t*', 0xB7CB84)[0]          -- CTimer::m_snTimeInMilliseconds
+    return nowMs >= ffi.cast('uint32_t*', wt)[4]
+end
 function RG.jaEngineFire(w, ox, oy, oz, tx, ty, tz, tped)
     local ped = getCharPointer(PLAYER_PED)
     if not ped or ped == 0 then return false, 'no ped' end
@@ -2792,11 +2811,13 @@ function RG.jaEngineFire(w, ox, oy, oz, tx, ty, tz, tped)
     if tped then local okp, pp = pcall(getCharPointer, tped); if okp and pp and pp ~= 0 then te = pp end end
     -- bool __thiscall CWeapon::Fire(CEntity* owner, CVector* origin, CVector* muzzle, CEntity* target, CVector* targetPos, CVector* driveBy)
     local st0, tm0 = wt[1], wt[4]
+    local gameRate = (O.ja_rsrc or 0) == 0
     local r = callMethod(0x742300, wp, 6, 0, ped, base, base, te, base + 12, 0)
     r = r and bit.band(r, 0xFF) ~= 0
     local st1, clip = wt[1], wt[2]
     if clip > 0 then wt[1] = 0 end                            -- FIRING не оставляем: оружие снова «готово»
-    wt[4] = tm0                                               -- таймер выстрела как был
+    if not gameRate then wt[4] = tm0 end                       -- темп «Скрипт»: игровой таймер не трогаем
+    -- темп «Как в игре»: оставляем таймер, который поставил Fire (его меняют рапид-фаер моды)
     return r, ('fire=%s st %d->%d clip %d'):format(tostring(r), st0, st1, clip)
 end
 -- анимация выстрела верхней частью тела (ноги продолжают прыжок)
@@ -2885,7 +2906,7 @@ function RG.jaTick(free)
     if method == 1 then return RG.jaJumpTick(free, true) end
     -- движок отказывается стрелять из задачи игрового прыжка (поэтому без бхопа/аир-стрейфа не работало):
     -- прыжок с оружием всегда делает скрипт, без задачи прыжка — и выстрел движком проходит стабильно
-    if method == 0 then RG.jaJumpTick(free, false) end
+    if method == 0 and O.ja_ownjump ~= false then RG.jaJumpTick(free, false) end
     if not isCharOnFoot(PLAYER_PED) or not isCharInAir(PLAYER_PED) or isCharInWater(PLAYER_PED) then return end
     local w = getCurrentCharWeapon(PLAYER_PED)
     local dmg = RG.DMG[w]
@@ -2895,7 +2916,9 @@ function RG.jaTick(free)
     local click = src ~= 1 and isKeyDown(0x01)
     local trig = src ~= 0 and O.tb_on and now - RG.tb.fireT < 0.05
     if not click and not trig then return end
-    if now - ja.lastT < (RG.JA_RATE[w] or 0.3) / ((O.ja_rate or 100) / 100) then return end
+    if method == 0 and (O.ja_rsrc or 0) == 0 then
+        if not RG.jaGameReady() then return end
+    elseif now - ja.lastT < (RG.JA_RATE[w] or 0.3) / ((O.ja_rate or 100) / 100) then return end
     local ammo = getAmmoInCharWeapon(PLAYER_PED, w)
     if (O.ja_ammo or method == 0) and ammo <= 0 then return end
     -- цель: триггер -> сайлент/рейдж -> никакой (пуля в прицел)
