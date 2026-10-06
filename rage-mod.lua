@@ -20,7 +20,7 @@
 
 script_name('rage-mod')
 script_author('rage-mod')
-script_version('4.5.1')
+script_version('4.6.0')
 
 local imgui    = require 'mimgui'
 local encoding = require 'encoding'
@@ -351,6 +351,7 @@ do
         ['Water Color'] = 'Цвет воды',
         ['Custom Shadows'] = 'Свои тени',
         ['Shadow Strength'] = 'Сила теней',
+        ['Light Shadows'] = 'Тени от фонарей', ['Pole Shadows'] = 'Тени от столбов',
         ['Rainbow'] = 'Радуга',
         ['Saturation'] = 'Насыщенность',
         ['Font Size'] = 'Размер шрифта',
@@ -391,6 +392,8 @@ do
         ['CHAMS'] = 'ЧАМСЫ',
         ['HIT MARKER'] = 'ХИТМАРКЕР',
         ['VIEW OPTIONS'] = 'НАСТРОЙКИ ВИДА',
+        ['CHINA HAT'] = 'КИТАЙСКАЯ ШЛЯПА', ['China Hat'] = 'Китайская шляпа', ['Hat Size'] = 'Размер шляпы',
+        ['Hat Height'] = 'Высота шляпы', ['Hat Alpha'] = 'Прозрачность шляпы', ['Hide In First Person'] = 'Скрывать от первого лица',
         ['WEATHER & TIME'] = 'ПОГОДА И ВРЕМЯ',
         ['SCREEN EFFECTS'] = 'ЭФФЕКТЫ ЭКРАНА',
         ['CROSSHAIR'] = 'ПРИЦЕЛ',
@@ -877,6 +880,15 @@ VIS.SUB_VIEW = { title = 'VIEW OPTIONS', rows = CARD('v', {
     T_('Thermal Vision', false, 'v_ir'),
     SL('Field of View', 50, 120, 85, '%d', false, 'v_fov'),
 }) }
+VIS.SUB_HAT = { title = 'CHINA HAT', rows = CARD('hat', {
+    COL('Enabled', false, { 102, 124, 246 }, 'hat_on'),
+    SL('Hat Size', 20, 80, 42, '%d cm', false, 'hat_size'),
+    SL('Hat Height', 10, 60, 24, '%d cm', false, 'hat_height'),
+    SL('Hat Alpha', 20, 255, 130, '%d', false, 'hat_alpha'),
+    T_('Gradient', true, 'hat_grad'),
+    T_('Outline', true, 'hat_ol'),
+    T_('Hide In First Person', true, 'hat_fp'),
+}) }
 VIS.WEATHERS = { 'Sunny', 'Extra Sunny', 'Clear', 'Cloudy', 'Rainy', 'Foggy', 'Sandstorm', 'Purple', 'Green', 'Dark Red', 'Toxic', 'Underwater' }
 VIS.WEATHER_ID = { 1, 0, 10, 4, 8, 9, 19, 2009, 2003, 1337, 150, 700 }
 VIS.SUB_WT = { title = 'WEATHER & TIME', rows = CARD('wt', {
@@ -963,9 +975,11 @@ VIS.SUB_LIGHT = { title = 'LIGHTING', rows = CARD('lt', {
     VIS.CLR('Water Color', { 40, 160, 255, 200 }, 'wat_c'),
     T_('Custom Shadows', false, 'shd_on'),
     SL('Shadow Strength', 0, 255, 160, '%d', false, 'shd_val'),
+    SL('Light Shadows', 0, 255, 160, '%d', false, 'shd_light'),
+    SL('Pole Shadows', 0, 255, 160, '%d', false, 'shd_pole'),
 }) }
 VIS.SUB_RB = { title = 'RAINBOW', rows = CARD('rb', {
-    MUL('Rainbow', { 'Box', 'Skeleton', 'Chams', 'Tracers', 'Crosshair', 'Glow', 'Silhouette', 'Snaplines', 'Sky' }, 0, 'rb_mask'),
+    MUL('Rainbow', { 'Box', 'Skeleton', 'Chams', 'Tracers', 'Crosshair', 'Glow', 'Silhouette', 'Snaplines', 'Sky', 'China Hat' }, 0, 'rb_mask'),
     SL('Speed', 1, 20, 6, '%d', false, 'rb_speed'),
     SL('Saturation', 10, 100, 80, '%d%%', false, 'rb_sat'),
 }) }
@@ -1040,6 +1054,7 @@ local ROWS = {
     w_view = CARD('w_view', {
         CH('View Options', VIS.SUB_VIEW), CH('Lighting', VIS.SUB_LIGHT), CH('Sun & Clouds', VIS.SUB_SUN),
         CH('Weather & Time', VIS.SUB_WT), CH('Screen Effects', VIS.SUB_SCR), CH('Crosshair', VIS.SUB_XH),
+        CH('China Hat', VIS.SUB_HAT),
     }),
     w_hud = CARD('w_hud', {
         CH('Watermark', VIS.SUB_WM), T_('Keybinds List', true, 'hud_keys'), T_('Hide HUD', false, 'hud_hide'),
@@ -1998,6 +2013,16 @@ local function bhopDir(I)
     return -math.sin(h), math.cos(h)
 end
 
+-- Bunny Hop без подтормаживания: isCharInAir становится false уже ПОСЛЕ касания земли — к этому
+-- моменту игра гасит скорость и включает анимацию приземления (FALL_land / JUMP_land), отсюда «торможение».
+-- Поэтому прыгаем заранее: когда до земли осталось меньше, чем пролетим за ~2 кадра.
+function VIS.bhLanding(x, y, z, vz)
+    if vz > -0.5 then return false end
+    local gz = getGroundZFor3dCoord(x, y, z)
+    if not gz or gz < -90 then return false end
+    return (z - gz - 1.0) < (-vz) * 0.034 + 0.12   -- центр педа ~1.0 м над ступнями
+end
+
 local function mvAir(I, speed)
     local vx, vy, vz = getCharVelocity(PLAYER_PED)
     local hs = math.sqrt(vx * vx + vy * vy)
@@ -2042,6 +2067,22 @@ local function aaMoveTick(free, I)
     local vx, vy, vz = getCharVelocity(PLAYER_PED)
     local inAir = isCharInAir(PLAYER_PED)
 
+    -- Bunny Hop: прыжок ещё в воздухе, за мгновение до земли — без потери скорости
+    if O.m_move_bunny_hop and I.jump and inAir and now - mvJumpT > 0.2 and VIS.bhLanding(x, y, z, vz) then
+        mvJumpT = now
+        local ex, ey = bhopDir(I)
+        if ex then
+            setCharVelocity(PLAYER_PED, ex * O.bhop_speed, ey * O.bhop_speed, AA_JUMP_VZ)
+        elseif I.moving then
+            local s = math.max(speed, math.sqrt(vx * vx + vy * vy))
+            setCharVelocity(PLAYER_PED, dx * s, dy * s, AA_JUMP_VZ)
+        else
+            setCharVelocity(PLAYER_PED, vx, vy, AA_JUMP_VZ)
+        end
+        aaPos = nil
+        aaJumpHeld = I.jump
+        return
+    end
     -- прыжок по нажатию; с Bunny Hop — и при зажатой клавише (прыгает сразу при приземлении)
     if I.jump and (not aaJumpHeld or O.m_move_bunny_hop) and not inAir and now - mvJumpT > 0.3 then
         local s = speed
@@ -2056,7 +2097,10 @@ local function aaMoveTick(free, I)
     aaJumpHeld = I.jump
     -- первые кадры прыжка игра может гасить вертикальную скорость — дожимаем, пока не оторвались
     if not inAir and now - mvJumpT < 0.15 then
-        setCharVelocity(PLAYER_PED, dx * speed, dy * speed, AA_JUMP_VZ)
+        -- не режем скорость банни-хопа до скорости бега
+        local hx, hy = vx, vy
+        if hx * hx + hy * hy < speed * speed then hx, hy = dx * speed, dy * speed end
+        setCharVelocity(PLAYER_PED, hx, hy, AA_JUMP_VZ)
         aaPos = nil
         return
     end
@@ -2163,14 +2207,24 @@ local function mvTick(free, I)
     -- Bunny Hop: держишь прыжок — прыгаем в момент приземления, сохраняя скорость полёта
     -- с банни-хопом прыжок делает скрипт (игровой прыжок блокируем, чтобы не мешал)
     if O.m_move_bunny_hop then setGameKeyState(BTN_JUMP, 0) end
-    if O.m_move_bunny_hop and I.jump and (mv.wasAir or not mv.jumpHeld) and not inAir and not water and now - mvJumpT > 0.2 then
+    -- прыжок ещё в воздухе, за мгновение до касания (без кадра на земле и анимации приземления)
+    local preLand = O.m_move_bunny_hop and I.jump and inAir and not water and now - mvJumpT > 0.2
+        and VIS.bhLanding(x, y, z, vz)
+    if preLand or (O.m_move_bunny_hop and I.jump and (mv.wasAir or not mv.jumpHeld) and not inAir and not water and now - mvJumpT > 0.2) then
         local ex, ey = bhopDir(I)
         if ex then
             mv.airVx, mv.airVy = ex * O.bhop_speed, ey * O.bhop_speed
-        elseif not mv.wasAir then
-            mv.airVx, mv.airVy = vx, vy       -- первый прыжок по инерции — с текущей скоростью бега
+        elseif preLand or not mv.wasAir then
+            mv.airVx, mv.airVy = vx, vy       -- по инерции — с текущей скоростью полёта / бега
         end
-        mvDoJump(mv.airVx, mv.airVy)
+        if preLand then
+            mvJumpT = now
+            setCharVelocity(PLAYER_PED, mv.airVx, mv.airVy, AA_JUMP_VZ)
+        else
+            mvDoJump(mv.airVx, mv.airVy)
+        end
+        mv.wasAir, mv.prevMoving, mv.jumpHeld = true, I.moving, I.jump
+        return
     elseif not inAir and now - mvJumpT < 0.15 then
         setCharVelocity(PLAYER_PED, mv.airVx, mv.airVy, AA_JUMP_VZ)
     end
@@ -2400,7 +2454,7 @@ VIS.BONE_IDS = { 2, 3, 4, 5, 8, 22, 23, 24, 25, 32, 33, 34, 35, 41, 42, 43, 44, 
 
 -- ---------- цвета (O[key_rgb] = 0xRRGGBBAA) ----------
 VIS.RB = { esp_box_vis = 1, esp_box_hid = 1, esp_skel = 2, esp_skel_hid = 2, chm_vis = 4, chm_hid = 4, chm_local_c = 4, chm_team_c = 4, chm_shot = 4,
-    trc_local = 8, trc_enemies = 8, xh_c = 16, pl_model_glow = 32, chm_sil = 64, esp_snap_c = 128, sky_top = 256, sky_bot = 256 }
+    trc_local = 8, trc_enemies = 8, xh_c = 16, pl_model_glow = 32, chm_sil = 64, esp_snap_c = 128, sky_top = 256, sky_bot = 256, hat_on = 512 }
 function VIS.rainbow(off, a)
     local h = (os.clock() * (O.rb_speed or 6) * 0.05 + (off or 0)) % 1
     local sat = (O.rb_sat or 80) / 100
@@ -2509,6 +2563,61 @@ function sampev.onBulletSync(playerId, data)
     if data and data.origin and data.target then
         if O.trc_enemies then VIS.addTracer(data.origin, data.target, 'trc_enemies') end
         VIS.addImpact(data.target)
+    end
+end
+
+-- ---------- CHINA HAT (конус над головой; считаем в main-потоке, рисуем в OnFrame) ----------
+function VIS.hatTick(cx, cy, cz)
+    VIS.hat = nil
+    if not O.hat_on or not doesCharExist(PLAYER_PED) then return end
+    local ptr = getCharPointer(PLAYER_PED)
+    if not ptr or ptr == 0 then return end
+    local hx, hy, hz = VIS.bone(ptr, 8)
+    if not hx or (hx == 0 and hy == 0 and hz == 0) then return end
+    local d2 = (hx - cx) ^ 2 + (hy - cy) ^ 2 + (hz - cz) ^ 2
+    if O.hat_fp and d2 < 0.8 * 0.8 then return end      -- от первого лица шляпа закрыла бы экран
+    local r, h = (O.hat_size or 42) / 100, (O.hat_height or 24) / 100
+    local bz = hz + 0.14
+    local ax, ay = VIS.proj(hx, hy, bz + h)
+    if not ax then return end
+    local N, spin = 36, os.clock() * 0.8
+    local ring, dmin, dmax = {}, math.huge, 0
+    for i = 0, N - 1 do
+        local a = spin + i / N * 2 * math.pi
+        local px, py = hx + math.cos(a) * r, hy + math.sin(a) * r
+        local sx, sy = VIS.proj(px, py, bz)
+        if not sx then return end
+        local d = (px - cx) ^ 2 + (py - cy) ^ 2 + (bz - cz) ^ 2
+        dmin, dmax = math.min(dmin, d), math.max(dmax, d)
+        ring[i + 1] = { sx, sy, d, i / N }
+    end
+    local segs, span = {}, math.max(dmax - dmin, 1e-4)
+    for i = 1, N do
+        local p, q = ring[i], ring[i % N + 1]
+        local d = (p[3] + q[3]) * 0.5
+        segs[i] = { p, q, d, 1 - (d - dmin) / span }
+    end
+    table.sort(segs, function(a, b) return a[3] > b[3] end)   -- дальние сначала
+    VIS.hat = { ax = ax, ay = ay, ring = ring, segs = segs }
+end
+function VIS.drawHat(dl)
+    local h = VIS.hat
+    if not h then return end
+    local rb = bit.band(O.rb_mask or 0, VIS.RB.hat_on) ~= 0
+    local base, alpha = VIS.rgb('hat_on', true), O.hat_alpha or 130
+    local apex = V(h.ax, h.ay)
+    for _, s in ipairs(h.segs) do
+        local c = rb and VIS.rainbow(s[1][4]) or base
+        local k = O.hat_grad and (0.5 + 0.5 * s[4]) or 1
+        dl:AddTriangleFilled(apex, V(s[1][1], s[1][2]), V(s[2][1], s[2][2]), C(c[1] * k, c[2] * k, c[3] * k, alpha))
+    end
+    if O.hat_ol then
+        local n = #h.ring
+        for i = 1, n do
+            local p, q = h.ring[i], h.ring[i % n + 1]
+            local c = rb and VIS.rainbow(p[4]) or base
+            dl:AddLine(V(p[1], p[2]), V(q[1], q[2]), C(c[1], c[2], c[3], 255), 1.6)
+        end
     end
 end
 
@@ -2793,22 +2902,27 @@ function VIS.drawSil(dl, e)
     bodyPass(1, 1, true)
 end
 
--- ---------- заморозка CTimeCycle::Update (0x5BBAC0), чтобы игра не перетирала наши цвета ----------
+-- ---------- заморозка CTimeCycle::Update (0x561760), чтобы игра не перетирала наши цвета ----------
+-- Раньше патчился 0x5BBAC0 — это CTimeCycle::Initialise, а не Update: игра каждый кадр
+-- пересчитывала m_CurrentColours и затирала своё небо / тени. Update = CalcColoursForPoint(камера).
+VIS.TC_UPDATE = 0x561760
 function VIS.tcFreeze(on)
     local mem = require 'memory'
     if on == (VIS.tcState == 'frozen') then return end
+    if VIS.tcState == 'bad' and on then return end
+    local A = VIS.TC_UPDATE
     if on then
-        local pre, first = mem.getuint8(0x5BBABF, true), mem.getuint8(0x5BBAC0, true)
+        local pre, first = mem.getuint8(A - 1, true), mem.getuint8(A, true)
         if first == 0xC3 or not (pre == 0xCC or pre == 0x90 or pre == 0xC3) then
-            if VIS.tcState ~= 'bad' then chat('небо/туман: адрес CTimeCycle::Update не совпал — версия игры не 1.0 US?') end
+            chat('небо/тени: адрес CTimeCycle::Update не совпал — версия игры не 1.0 US?')
             VIS.tcState = 'bad'
             return
         end
         VIS.tcOrig = first
-        mem.setuint8(0x5BBAC0, 0xC3, true)
+        mem.setuint8(A, 0xC3, true)
         VIS.tcState = 'frozen'
     else
-        if VIS.tcOrig then mem.setuint8(0x5BBAC0, VIS.tcOrig, true) end
+        if VIS.tcOrig then mem.setuint8(A, VIS.tcOrig, true) end
         VIS.tcState = 'normal'
     end
 end
@@ -2834,7 +2948,11 @@ function VIS.timecycTick()
     end
     if O.sky_on then
         VIS.tc16(0xB7C4C4, VIS.rgb('sky_top'))
-        VIS.tc16(0xB7C4CA, VIS.rgb('sky_bot'))
+        local b = VIS.rgb('sky_bot')
+        VIS.tc16(0xB7C4CA, b)
+        -- цвет «под горизонтом» (низ неба / дальний туман) Update тоже не пересчитает — пишем сами
+        local g = ffi.cast('uint8_t*', 0xB7CB10)
+        g[0], g[1], g[2] = b[1], b[2], b[3]
     end
     if O.sun_on then
         VIS.tc16(0xB7C4D0, VIS.rgb('sun_core'))
@@ -2856,7 +2974,11 @@ function VIS.timecycTick()
         VIS.tcF(0xB7C528, VIS.rgb('flt_c'), true)
     end
     if O.wat_on then VIS.tcF(0xB7C508, VIS.rgb('wat_c'), true) end
-    if O.shd_on then ffi.cast('int16_t*', 0xB7C4E8)[0] = O.shd_val or 160 end
+    if O.shd_on then
+        -- m_nShadowStrength / m_nLightShadowStrength / m_nPoleShadowStrength
+        local sp = ffi.cast('int16_t*', 0xB7C4E8)
+        sp[0], sp[1], sp[2] = O.shd_val or 160, O.shd_light or 160, O.shd_pole or 160
+    end
 end
 
 -- ---------- состояние мира (main-поток) ----------
@@ -3415,6 +3537,7 @@ function VIS.tick(ready)
     end
     VIS.drawSouls = ds
     pcall(VIS.btProject, now)
+    if ready then pcall(VIS.hatTick, cx, cy, cz) else VIS.hat = nil end
     VIS.active = true
     VIS.chamsTick(ready, now)
 end
@@ -3879,6 +4002,7 @@ imgui.OnFrame(function() return VIS.active end, function(self)
     local saveA = gA
     gA = 1
     pcall(VIS.drawScreenFx, dl, sw, sh, now)
+    if VIS.ready then pcall(VIS.drawHat, dl) end
     if VIS.ready then
         local style, wd = O.trc_style or 1, O.trc_w or 1.6
         for _, t in ipairs(VIS.drawTr) do
