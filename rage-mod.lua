@@ -20,7 +20,7 @@
 
 script_name('rage-mod')
 script_author('rage-mod')
-script_version('4.0.1')
+script_version('4.0.2')
 
 local imgui    = require 'mimgui'
 local encoding = require 'encoding'
@@ -57,6 +57,24 @@ local function chat(text)
     if not ok or not s then return end
     if #s > 140 then s = s:sub(1, 140) end
     sampAddChatMessage(s, -1)
+end
+
+-- ---------- трассировка для поиска краша ----------
+-- последние действия скрипта пишутся в moonloader\rage-mod-trace.txt (раз в 0.2 с).
+-- После вылета этот файл покажет, что скрипт делал прямо перед крашем.
+local TR = { buf = {}, n = 0, last = 0 }
+function TR.T(what)
+    TR.n = TR.n + 1
+    TR.buf[(TR.n - 1) % 40 + 1] = ('%.3f %s'):format(os.clock(), what)
+end
+function TR.flush()
+    if os.clock() - TR.last < 0.2 then return end
+    TR.last = os.clock()
+    local f = io.open(getWorkingDirectory() .. '\\rage-mod-trace.txt', 'w')
+    if not f then return end
+    f:write('rage-mod ', thisScript().version, '\n')
+    for i = math.max(1, TR.n - 39), TR.n do f:write(TR.buf[(i - 1) % 40 + 1] or '', '\n') end
+    f:close()
 end
 
 local function clamp(v, a, b) return math.max(a, math.min(b, v)) end
@@ -1378,6 +1396,7 @@ local function wrapPi(a) return (a + PI) % (2 * PI) - PI end
 local localSpinning, lastForce = false, 0
 
 function sampev.onSendPlayerSync(data)
+    TR.T('playersync')
     if not aaActive() then return end
     local base = getCharHeading(PLAYER_PED)
     local q = data.quaternion
@@ -1398,6 +1417,7 @@ end
 -- Pitch: другие видят голову, опущенную вниз (Down) или задранную вверх (Up).
 -- В момент флика/выстрела AimSync не трогаем — выстрел выглядит честным.
 function sampev.onSendAimSync(data)
+    TR.T('aimsync')
     if not aaActive() or (O.aa_pitch or 0) == 0 then return end
     if O.aa_mode == 4 and aaFlicking() then return end
     local pitch = math.rad(O.aa_pitch == 1 and -89 or 89)
@@ -1550,6 +1570,7 @@ local function aaMoveTick(free, I)
     end
     local nx, ny = aaPos.x + dx * speed * dt, aaPos.y + dy * speed * dt
     -- не проходим сквозь стены/машины/объекты (проверка чуть впереди, на уровне пояса)
+    TR.T('aa.move.los')
     if isLineOfSightClear(aaPos.x, aaPos.y, z, nx + dx * 0.45, ny + dy * 0.45, z, true, true, false, true, false) then
         aaPos.x, aaPos.y = nx, ny
     end
@@ -1581,6 +1602,7 @@ local function aaTick(free, I)
     -- частая отправка синхронизации, чтобы вращение у других было плавным
     if O.aa_force and os.clock() - lastForce > 0.04 then
         lastForce = os.clock()
+        TR.T('aa.forcesync')
         pcall(sampForceOnfootSync)
     end
 end
@@ -1609,6 +1631,7 @@ local function mvTick(free, I)
 
     -- Jump Bug: гасим скорость падения прямо перед землёй — без урона от падения
     if O.m_move_jump_bug and inAir and not water and vz < -9 then
+        TR.T('mv.jumpbug.groundz')
         local gz = getGroundZFor3dCoord(x, y, z)
         if z - gz < 1.6 + (-vz) / 30 then setCharVelocity(PLAYER_PED, vx, vy, -2.0) end
     end
@@ -1622,6 +1645,7 @@ local function mvTick(free, I)
             ex, ey, es = vx / hs, vy / hs, hs
         end
         if ex then
+            TR.T('mv.edgejump.groundz')
             local g0 = getGroundZFor3dCoord(x, y, z)
             local g1 = getGroundZFor3dCoord(x + ex * 0.8, y + ey * 0.8, z + 0.5)
             if g0 - g1 > 1.5 then mvDoJump(ex * es, ey * es) end
@@ -1763,7 +1787,7 @@ function RG.find(weapon, strict)
                             if dist > 0.5 and dist < 300 then
                                 local dot = (dx * fx + dy * fy + dz * fz) / dist
                                 local ang = math.deg(math.acos(math.max(-1, math.min(1, dot))))
-                                if ang <= fov and (walls or isLineOfSightClear(cx, cy, cz, tx, ty, tz, true, true, false, true, false)) then
+                                if ang <= fov and (walls or TR.T('rg.find.los') or isLineOfSightClear(cx, cy, cz, tx, ty, tz, true, true, false, true, false)) then
                                     local score = (prefer == 0) and (hp * 1000 + ang) or ang
                                     if score < bestScore then
                                         bestScore = score
@@ -1795,6 +1819,7 @@ function RG.onBullet(data)
         local rs = O.rage_other_remove_spread or 0
         if rs > 0 and data.targetType == 0 then
             local cx, cy, cz, fx, fy, fz = RG.cam()
+            TR.T('rg.spread.los')
             local ok, cp = processLineOfSight(cx, cy, cz, cx + fx * 300, cy + fy * 300, cz + fz * 300, true, true, false, true, false, false, false, false)
             if ok and cp and cp.pos then
                 local k = rs == 2 and 1 or 0.5
@@ -1818,10 +1843,12 @@ function RG.onBullet(data)
     end
     lua_thread.create(function()
         if not sampIsPlayerConnected(id) then return end
+        TR.T('rg.givedamage ' .. id .. ' w' .. w)
         sampSendGiveDamage(id, dmg, w, bp)
         if O.m_feat_hit_sound then addOneOffSound(0.0, 0.0, 0.0, 17802) end
         if O.rage_other_double_tap then
             wait(60)
+            TR.T('rg.doubletap ' .. id)
             sampSendGiveDamage(id, dmg, w, bp)
         end
     end)
@@ -1884,6 +1911,7 @@ local QS_WEAPONS = { [24] = true, [25] = true, [27] = false, [33] = true, [34] =
 local qsPending, qsBusy = false, false
 
 function sampev.onSendBulletSync(data)
+    TR.T('bulletsync')
     pcall(RG.onBullet, data)
     if O.aa_enable and O.aa_mode == 4 then aaFlickUntil = os.clock() + (O.aa_flick_ms or 200) / 1000 end
     if O.m_feat_quick_switch and spawnedAt then qsPending = true end
@@ -1898,8 +1926,10 @@ local function qsTick()
     qsBusy = true
     lua_thread.create(function()
         wait(30)
+        TR.T('qs.switch0')
         setCurrentCharWeapon(PLAYER_PED, 0)
         wait(60)
+        TR.T('qs.switchback ' .. w)
         if doesCharExist(PLAYER_PED) then setCurrentCharWeapon(PLAYER_PED, w) end
         qsBusy = false
     end)
@@ -2056,6 +2086,8 @@ function main()
             O.aa_enable = not O.aa_enable
             if O.notify then chat('Anti-Aim: ' .. (O.aa_enable and '{3DE07A}ON' or '{E03D3D}OFF')) end
         end
+        TR.T('frame')
+        TR.flush()
         local ready = gameReady()
         local I = ready and mvInput(free) or nil
         aaTick(free, I)
