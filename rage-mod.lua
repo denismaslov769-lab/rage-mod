@@ -20,7 +20,7 @@
 
 script_name('rage-mod')
 script_author('rage-mod')
-script_version('4.8.23')
+script_version('4.8.24')
 
 local imgui    = require 'mimgui'
 local encoding = require 'encoding'
@@ -2006,6 +2006,15 @@ local function aaActive()
     return true
 end
 
+-- поза «наклон вниз» у других: удалённые клиенты гнут торс по питчу только в позе прицеливания,
+-- поэтому вместе с питчем шлём зажатый прицел (KEY_AIM) и прицельную камеру
+function VIS.aaPitchPose()
+    if not aaActive() or (O.aa_pitch or 0) == 0 then return false end
+    if O.aa_mode == 4 and aaFlicking() then return false end
+    local w = getCurrentCharWeapon(PLAYER_PED)
+    return w >= 22 and w <= 38
+end
+
 local function aaSpinAngle() return (os.clock() * O.aa_speed * 24) % 360 end
 
 local function aaYaw(base)
@@ -2042,6 +2051,10 @@ function sampev.onSendPlayerSync(data)
     q[1] = 0
     q[2] = 0
     q[3] = aaSign * math.sin(h / 2)
+    if VIS.aaPitchPose() then
+        data.keysData = bit.bor(data.keysData or 0, 128)   -- KEY_AIM: у других персонаж целится -> гнётся по питчу
+        data.weapon = getCurrentCharWeapon(PLAYER_PED)
+    end
 end
 
 -- Pitch: другие видят голову, опущенную вниз (Down) или задранную вверх (Up).
@@ -2058,6 +2071,7 @@ function sampev.onSendAimSync(data)
     data.camFront.y = math.cos(yaw) * c
     data.camFront.z = math.sin(pitch)
     data.aimZ = pitch
+    if VIS.aaPitchPose() then data.camMode = 53 end           -- прицельная камера оружия
 end
 
 -- ---------- настоящая крутилка у себя («Show Locally») на бегу и в прыжке ----------
@@ -2262,6 +2276,11 @@ local function aaTick(free, I)
         lastForce = os.clock()
         TR.T('aa.forcesync')
         pcall(sampForceOnfootSync)
+    end
+    -- сами не целимся — клиент aim-синк не шлёт; шлём его сами, чтобы у других была поза с наклоном
+    if os.clock() - (VIS.aaAimT or 0) > 0.1 and not isKeyDown(0x02) and VIS.aaPitchPose() then
+        VIS.aaAimT = os.clock()
+        pcall(sampForceAimSync)
     end
 end
 
