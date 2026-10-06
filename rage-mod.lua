@@ -1,27 +1,24 @@
 --[[
     rage-mod — MoonLoader скрипт для SA-MP
-    Полный порт меню neverlose-last (D3D11 / Dear ImGui -> mimgui):
-      * все страницы 1:1 — Rage, Legit, Visuals (Players / World), Inventory, Miscellaneous
-      * те же координаты, размеры, цвета, скругления и анимации (Motion), что в neverlose_menu.cpp
-      * поповер аккаунта, стеклянные выпадающие списки (масштаб 0.96 -> 1), плавная смена страниц,
-        появление меню (масштаб 0.92 -> 1), раскрытие группы Visuals
-      * Inventory: вместо нарисованных пушек — НАСТОЯЩИЕ иконки оружия из игры
-        (те же текстуры <model>icon, что рисует HUD GTA SA), берутся прямо из TXD в памяти
+    Порт меню neverlose-last (D3D11 / Dear ImGui -> mimgui):
+      * страницы Rage, Legit, Visuals (Players / World), Inventory, Miscellaneous
+      * поповер аккаунта: язык (English / Русский), масштаб меню (100/125/150%), масштаб ESP-превью
+      * Players: живое ESP-превью (бокс, имя, HP, оружие, дистанция, чамсы, свечение)
+      * иконки оружия — настоящие текстуры <model>icon из игры (как в HUD)
 
-    ВАЖНО: Rage/Legit/ESP/Misc здесь — ТОЛЬКО интерфейс (значения сохраняются в конфиг).
+    Rage/Legit/ESP/Misc — ТОЛЬКО интерфейс (значения сохраняются в конфиг).
     Anti-Aim (крутилка) — рабочий: Rage -> ANTI-AIM -> Enabled, настройки в «Yaw ›».
+    Крутилку видят ДРУГИЕ игроки (подмена поворота в PlayerSync). Чтобы видеть её и у себя —
+    опция «Show Locally» (крутит вашего персонажа, пока вы стоите на месте).
 
-    Шрифты (необязательно, но для 1:1 вида положите из архива neverlose-last в
-    moonloader\resource\rage-mod\):  SSTMedium.TTF, SSTBold.TTF, fa-solid-900.ttf
-    Без них используется Segoe UI и векторные иконки.
-
+    Шрифты (необязательно): moonloader\resource\rage-mod\SSTMedium.TTF, SSTBold.TTF, fa-solid-900.ttf
     Активация: /ragemd или клавиша (по умолчанию Insert, меняется в меню профиля в тулбаре).
     Зависимости: MoonLoader 0.26+, SAMPFUNCS, mimgui, SAMP.Lua (samp.events)
 ]]
 
 script_name('rage-mod')
 script_author('rage-mod')
-script_version('3.1.0')
+script_version('3.2.0')
 
 local imgui    = require 'mimgui'
 local encoding = require 'encoding'
@@ -34,7 +31,22 @@ local new = imgui.new
 
 local CFG_FILE = 'rage-mod.ini'
 local menu = new.bool(false)
-local F = {}
+local O, DEF = {}, {}
+
+-- ============================================================ МАСШТАБ / ШРИФТЫ
+-- Всё меню рисуется в «логических» координатах (как в оригинале), а прокси-drawlist
+-- масштабирует их вокруг левого верхнего угла окна. Шрифты загружены под каждый масштаб.
+local SCALES = { 1.0, 1.25, 1.5 }
+local ESP_SCALES = { 1.0, 1.1, 1.2 }
+local FS = {}          -- FS[i] = { body=, ctrl=, ... } для каждого масштаба
+local F = {}           -- текущий набор шрифтов
+local SC, OX, OY = 1, 0, 0
+
+local function applyScale()
+    local i = math.max(1, math.min(#SCALES, (O.acc_menu_scale or 0) + 1))
+    SC = SCALES[i]
+    if FS[i] then for k, v in pairs(FS[i]) do F[k] = v end end
+end
 
 -- ============================================================ УТИЛИТЫ
 local function chat(text)
@@ -43,8 +55,10 @@ end
 
 local function clamp(v, a, b) return math.max(a, math.min(b, v)) end
 local function V(x, y) return imgui.ImVec2(x, y) end
+local function TV(x, y) return imgui.ImVec2(OX + (x - OX) * SC, OY + (y - OY) * SC) end
+local function T(v) return imgui.ImVec2(OX + (v.x - OX) * SC, OY + (v.y - OY) * SC) end
 
-local gA = 1 -- глобальный множитель альфы (анимации появления)
+local gA = 1
 local function C(r, g, b, a)
     return imgui.ColorConvertFloat4ToU32(imgui.ImVec4(r / 255, g / 255, b / 255, clamp(((a or 255) / 255) * gA, 0, 1)))
 end
@@ -55,7 +69,6 @@ local function Mix(c1, c2, t)
              c1[3] + (c2[3] - c1[3]) * t, a1 + (a2 - a1) * t)
 end
 
--- экспоненциальное сглаживание — Motion() из оригинала
 local anim = {}
 local function Motion(key, target, speed, initial)
     local v = anim[key]
@@ -66,11 +79,31 @@ local function Motion(key, target, speed, initial)
     return v
 end
 
+-- прокси drawlist: масштабирует точки/радиусы/толщины
+local P = {}
+P.__index = P
+local function wrapDL(raw) return setmetatable({ raw = raw }, P) end
+function P:AddRectFilled(a, b, col, r) self.raw:AddRectFilled(T(a), T(b), col, (r or 0) * SC) end
+function P:AddRect(a, b, col, r) self.raw:AddRect(T(a), T(b), col, (r or 0) * SC) end
+function P:AddRectFilledMultiColor(a, b, c1, c2, c3, c4) self.raw:AddRectFilledMultiColor(T(a), T(b), c1, c2, c3, c4) end
+function P:AddLine(a, b, col, th) self.raw:AddLine(T(a), T(b), col, (th or 1) * SC) end
+function P:AddCircle(c, r, col, seg, th) self.raw:AddCircle(T(c), r * SC, col, seg or 24, (th or 1) * SC) end
+function P:AddCircleFilled(c, r, col, seg) self.raw:AddCircleFilled(T(c), r * SC, col, seg or 24) end
+function P:AddTriangleFilled(a, b, c, col) self.raw:AddTriangleFilled(T(a), T(b), T(c), col) end
+function P:AddQuadFilled(a, b, c, d, col) self.raw:AddQuadFilled(T(a), T(b), T(c), T(d), col) end
+function P:AddImage(tex, a, b, uv0, uv1, col) self.raw:AddImage(tex, T(a), T(b), uv0, uv1, col) end
+function P:AddText(p, col, s) self.raw:AddText(T(p), col, s) end
+function P:PushClipRect(a, b, i) self.raw:PushClipRect(T(a), T(b), i) end
+function P:PopClipRect() self.raw:PopClipRect() end
+function P:PathLineTo(p) self.raw:PathLineTo(T(p)) end
+function P:PathArcTo(c, r, a1, a2, seg) self.raw:PathArcTo(T(c), r * SC, a1, a2, seg) end
+function P:PathFillConvex(col) self.raw:PathFillConvex(col) end
+
 local function TextSize(str, font)
     if font then imgui.PushFont(font) end
     local s = imgui.CalcTextSize(str)
     if font then imgui.PopFont() end
-    return s
+    return { x = s.x / SC, y = s.y / SC }
 end
 local function Text(dl, x, y, col, str, font)
     if font then imgui.PushFont(font) end
@@ -83,10 +116,18 @@ local function TextY(dl, x, y, h, col, str, font)
 end
 
 local function Hit(id, x, y, w, h)
-    imgui.SetCursorScreenPos(V(x, y))
-    return imgui.InvisibleButton(id, V(w, h))
+    imgui.SetCursorScreenPos(TV(x, y))
+    return imgui.InvisibleButton(id, imgui.ImVec2(math.max(1, w * SC), math.max(1, h * SC)))
+end
+local function Mouse()
+    local m = imgui.GetMousePos()
+    return { x = OX + (m.x - OX) / SC, y = OY + (m.y - OY) / SC }
 end
 local function inRect(m, x, y, w, h) return m.x >= x and m.x <= x + w and m.y >= y and m.y <= y + h end
+local function screenL()
+    local sw, sh = getScreenResolution()
+    return OX - OX / SC, OY - OY / SC, OX + (sw - OX) / SC, OY + (sh - OY) / SC
+end
 
 local function Chevron(dl, x, y, col)
     dl:AddLine(V(x, y), V(x + 3, y + 3), col, 1.3)
@@ -97,29 +138,29 @@ local function CheckMark(dl, x, y, col)
     dl:AddLine(V(x + 3, y + 3), V(x + 8, y - 3), col, 1.5)
 end
 
--- трансформация вершин (масштаб/сдвиг как в оригинале). Если mimgui не даёт
--- доступ к VtxBuffer — просто пропускаем, остаётся анимация альфой.
 local VTX_OK = true
-local function vtxFirst(dl)
+local function vtxFirst(raw)
     if not VTX_OK then return 0 end
-    local ok, n = pcall(function() return dl.VtxBuffer.Size end)
+    local ok, n = pcall(function() return raw.VtxBuffer.Size end)
     if not ok then VTX_OK = false; return 0 end
     return n
 end
-local function vtxScale(dl, first, px, py, s, ox, oy)
+-- pivot в логических координатах
+local function vtxScale(raw, first, lx, ly, s, ox, oy)
     if not VTX_OK then return end
+    local pv = TV(lx, ly)
+    local px, py, dx, dy = pv.x, pv.y, ox * SC, oy * SC
     local ok = pcall(function()
-        local buf = dl.VtxBuffer
+        local buf = raw.VtxBuffer
         for i = first, buf.Size - 1 do
             local p = buf.Data[i].pos
-            p.x = px + (p.x - px) * s + ox
-            p.y = py + (p.y - py) * s + oy
+            p.x = px + (p.x - px) * s + dx
+            p.y = py + (p.y - py) * s + dy
         end
     end)
     if not ok then VTX_OK = false end
 end
 
--- закруглённые только некоторые углы (без наложения полупрозрачных прямоугольников)
 local PI = math.pi
 local function FillLeftRounded(dl, x1, y1, x2, y2, r, col)
     dl:PathLineTo(V(x2, y1)); dl:PathLineTo(V(x2, y2))
@@ -134,25 +175,88 @@ local function FillTopRightRounded(dl, x1, y1, x2, y2, r, col)
     dl:PathFillConvex(col)
 end
 
--- ============================================================ ИКОНКИ (Font Awesome как в оригинале)
+-- ============================================================ ЛОКАЛИЗАЦИЯ
+local RU = {
+    -- навигация / секции
+    ['Rage'] = 'Рейдж', ['Legit'] = 'Легит', ['Visuals'] = 'Визуалы', ['Players'] = 'Игроки', ['World'] = 'Мир',
+    ['Inventory'] = 'Инвентарь', ['Miscellaneous'] = 'Разное', ['AIMBOT'] = 'АИМБОТ', ['COMMON'] = 'ОБЩЕЕ',
+    ['MAIN'] = 'ОСНОВНОЕ', ['OTHER'] = 'ПРОЧЕЕ', ['SELECTION'] = 'ВЫБОР ЦЕЛИ', ['ANTI-AIM'] = 'АНТИ-АИМ',
+    ['TRIGGERBOT'] = 'ТРИГГЕРБОТ', ['ENEMY'] = 'ВРАГИ', ['ENEMY MODEL'] = 'МОДЕЛЬ ВРАГА', ['VIEW'] = 'ВИД',
+    ['WORLD ESP'] = 'ESP МИРА', ['MISCELLANEOUS'] = 'РАЗНОЕ', ['MOVEMENT'] = 'ДВИЖЕНИЕ', ['FEATURES'] = 'ФУНКЦИИ',
+    ['YAW'] = 'ПОВОРОТ',
+    -- ряды
+    ['Enabled'] = 'Включено', ['Silent Aim'] = 'Тихий аим', ['Automatic Fire'] = 'Автострельба',
+    ['Aim Through Walls'] = 'Сквозь стены', ['Refine Shot'] = 'Уточнение выстрела', ['Field of View'] = 'Поле зрения',
+    ['History'] = 'История', ['Delay Shot'] = 'Задержка выстрела', ['Remove Spread'] = 'Убрать разброс',
+    ['Duck Peek Assist'] = 'Пик из приседа', ['Quick Peek Assist'] = 'Быстрый пик', ['Double Tap'] = 'Двойной выстрел',
+    ['Prefer'] = 'Приоритет', ['Hitboxes'] = 'Хитбоксы', ['Hit Chance'] = 'Шанс попадания', ['Min Damage'] = 'Мин. урон',
+    ['Quick Stop'] = 'Быстрая остановка', ['Quick Scope'] = 'Быстрый прицел',
+    ['Suppress Breathing Animations'] = 'Без анимации дыхания', ['Leg Movement'] = 'Движение ног',
+    ['Pitch'] = 'Наклон', ['Yaw'] = 'Поворот', ['Mouse Override'] = 'Управление мышью',
+    ['Activation'] = 'Активация', ['Conditions'] = 'Условия', ['Smoothing'] = 'Плавность',
+    ['Reaction Time'] = 'Время реакции', ['Recoil Control'] = 'Контроль отдачи', ['Burst Time'] = 'Время очереди',
+    ['Visualize'] = 'Визуализация', ['Automatic Weapons'] = 'Автомат. оружие',
+    ['Standalone Recoil Control'] = 'Отдельный контроль отдачи', ['Randomize'] = 'Рандомизация',
+    ['Offscreen Arrow'] = 'Стрелки за экраном', ['Sounds'] = 'Звуки', ['Player'] = 'Игрок',
+    ['Behind Walls'] = 'За стенами', ['On Shot'] = 'При выстреле', ['Ragdolls'] = 'Рэгдоллы',
+    ['Soul Particles'] = 'Частицы души', ['Glow'] = 'Свечение', ['View Options'] = 'Настройки вида',
+    ['Scope Options'] = 'Настройки прицела', ['Viewmodel Options'] = 'Модель в руках',
+    ['Perspective Options'] = 'Перспектива', ['Unlock Spectating'] = 'Свободное наблюдение',
+    ['Visual Recoil'] = 'Визуальная отдача', ['Radar'] = 'Радар', ['Scope Overlay'] = 'Оверлей прицела',
+    ['Inaccuracy Overlay'] = 'Оверлей разброса', ['Death Notices'] = 'Килфид', ['Scoreboard'] = 'Таблица счёта',
+    ['Crosshairs'] = 'Прицелы', ['Bomb'] = 'Бомба', ['Weapons'] = 'Оружие', ['Hostages'] = 'Заложники',
+    ['Grenades'] = 'Гранаты', ['Grenade Trajectory'] = 'Траектория гранат',
+    ['Grenade Proximity Warnings'] = 'Предупр. о гранатах', ['Windows'] = 'Окна', ['Removals'] = 'Удаления',
+    ['Ambience'] = 'Атмосфера', ['Hit Marker'] = 'Хитмаркер', ['Bullet Tracers'] = 'Трассеры',
+    ['Bullet Impacts'] = 'Попадания пуль', ['Bunny Hop'] = 'Банни-хоп', ['Air Strafe'] = 'Стрейф в воздухе',
+    ['Jump Bug'] = 'Джамп-баг', ['Standalone Quick Stop'] = 'Быстрая остановка', ['Strafe Assist'] = 'Помощь стрейфа',
+    ['Edge Jump'] = 'Прыжок с края', ['Slow Walk'] = 'Медленная ходьба', ['Fast Ladder'] = 'Быстрая лестница',
+    ['Quick Switch'] = 'Быстрая смена', ['Super Toss'] = 'Супер-бросок', ['Knife Bot'] = 'Нож-бот',
+    ['Prevent AFK Kick'] = 'Анти-AFK', ['Hit Sound'] = 'Звук попадания', ['Automatic Purchase'] = 'Автозакупка',
+    ['Automatic Grenade Release'] = 'Автобросок гранаты', ['Auto-Accept Matchmaking'] = 'Автопринятие игры',
+    ['Log Events'] = 'Лог событий', ['Mode'] = 'Режим', ['Spin Speed'] = 'Скорость вращения',
+    ['Jitter Range'] = 'Диапазон джиттера', ['Disable While Aiming'] = 'Откл. при прицеливании',
+    ['Toggle Key'] = 'Клавиша', ['Show Locally'] = 'Показывать у себя', ['Force Sync'] = 'Частая синхронизация',
+    ['Weapon'] = 'Оружие',
+    -- значения
+    ['Off'] = 'Выкл', ['On'] = 'Вкл', ['Latency'] = 'Задержка', ['Performance'] = 'Скорость', ['Default'] = 'Обычный',
+    ['Maximum'] = 'Максимум', ['Damage'] = 'Урон', ['Accuracy'] = 'Точность', ['Partial'] = 'Частично',
+    ['Full'] = 'Полностью', ['Head'] = 'Голова', ['Body'] = 'Тело', ['Chest'] = 'Грудь', ['Stomach'] = 'Живот',
+    ['Arms'] = 'Руки', ['Legs'] = 'Ноги', ['Feet'] = 'Ступни', ['Walking'] = 'Ходьба', ['Sliding'] = 'Скольжение',
+    ['Always'] = 'Всегда', ['Assisted'] = 'С помощью', ['On Key'] = 'По клавише', ['Through Walls'] = 'Сквозь стены',
+    ['Through Smoke'] = 'Сквозь дым', ['In Air'] = 'В воздухе', ['Flashed'] = 'Ослеплён', ['None'] = 'Нет',
+    ['Low'] = 'Низкая', ['Medium'] = 'Средняя', ['High'] = 'Высокая', ['Solid'] = 'Сплошной', ['Flat'] = 'Плоский',
+    ['Water Flow'] = 'Переливы', ['Glass'] = 'Стекло', ['Glow Outline'] = 'Контур', ['Perspective'] = 'Перспектива',
+    ['Enemies'] = 'Враги', ['Teammates'] = 'Союзники', ['No Shake'] = 'Без тряски', ['No Recoil'] = 'Без отдачи',
+    ['Reveal Enemies'] = 'Показ врагов', ['Rotate'] = 'Вращение', ['Zoom Out'] = 'Отдаление',
+    ['Damage Dealt'] = 'Нанесённый урон', ['Damage Taken'] = 'Полученный урон', ['Purchases'] = 'Покупки',
+    ['Deaths'] = 'Смерти', ['Spin'] = 'Крутилка', ['Jitter'] = 'Джиттер', ['Random'] = 'Случайно',
+    ['Backward'] = 'Спиной',
+    -- прочее
+    ['Language'] = 'Язык', ['Menu Scale'] = 'Масштаб меню', ['ESP Scale'] = 'Масштаб ESP',
+    ['Synchronization'] = 'Синхронизация', ['Global'] = 'Общий', ['Save Config'] = 'Сохранить конфиг',
+    ['Load Config'] = 'Загрузить конфиг', ['Reset Config'] = 'Сбросить конфиг', ['Open Key: '] = 'Клавиша меню: ',
+    ['Notifications: '] = 'Уведомления: ', ['Loadout'] = 'Снаряжение', ['Pistols'] = 'Пистолеты',
+    ['Mid-Tier'] = 'Средние', ['Rifles'] = 'Винтовки', ['Box'] = 'Бокс', ['Name'] = 'Имя', ['Health'] = 'HP',
+    ['Dist'] = 'Дист.', ['Distance'] = 'Дистанция', ['offline'] = 'оффлайн', ['Profile'] = 'Профиль',
+}
+local function L(s)
+    if O.acc_lang == 1 and type(s) == 'string' then return RU[s] or s end
+    return s
+end
+
+-- ============================================================ ИКОНКИ
 local function utf8cp(cp)
     return string.char(0xE0 + bit.rshift(cp, 12), 0x80 + bit.band(bit.rshift(cp, 6), 0x3F), 0x80 + bit.band(cp, 0x3F))
 end
 local FA = {
-    rage = utf8cp(0xf05b),    -- ICON_FA_CROSSHAIRS
-    legit = utf8cp(0xf8cc),   -- ICON_FA_MOUSE
-    visuals = utf8cp(0xf03e), -- ICON_FA_IMAGE
-    players = utf8cp(0xf007), -- ICON_FA_USER
-    world = utf8cp(0xf0ac),   -- ICON_FA_GLOBE
-    inventory = utf8cp(0xf5fd), -- ICON_FA_LAYER_GROUP
-    misc = utf8cp(0xf1de),    -- ICON_FA_SLIDERS_H
-    save = utf8cp(0xf0c7),    -- ICON_FA_SAVE
-    list = utf8cp(0xf03a),    -- ICON_FA_LIST
+    rage = utf8cp(0xf05b), legit = utf8cp(0xf8cc), visuals = utf8cp(0xf03e), players = utf8cp(0xf007),
+    world = utf8cp(0xf0ac), inventory = utf8cp(0xf5fd), misc = utf8cp(0xf1de), save = utf8cp(0xf0c7),
+    list = utf8cp(0xf03a),
 }
 FA.user = FA.players
 local FA_RANGES = new.ImWchar[3](0xf000, 0xf8ff, 0)
 
--- векторный фолбэк, если fa-solid-900.ttf не найден
 local function rectOutline(dl, x1, y1, x2, y2, col, th)
     dl:AddLine(V(x1, y1), V(x2, y1), col, th); dl:AddLine(V(x2, y1), V(x2, y2), col, th)
     dl:AddLine(V(x2, y2), V(x1, y2), col, th); dl:AddLine(V(x1, y2), V(x1, y1), col, th)
@@ -208,16 +312,12 @@ VEC.list = function(dl, x, y, c)
         dl:AddLine(V(x + 5, y + 2 + i * 5), V(x + 14, y + 2 + i * 5), c, 1.6)
     end
 end
-
--- иконка, вертикально по центру строки высотой h
 local function Icon(dl, name, x, y, h, col)
     if F.icon then TextY(dl, x, y, h, col, FA[name], F.icon)
     else VEC[name](dl, x, y + math.floor((h - 14) * 0.5), col) end
 end
 
 -- ============================================================ ИКОНКИ ОРУЖИЯ ИЗ ИГРЫ
--- Каждое оружие в GTA SA имеет в своём TXD текстуру "<model>icon" — её рисует HUD.
--- Достаём IDirect3DTexture9* этой текстуры и отдаём в ImGui как ImTextureID.
 local WEAPON_MODEL = {
     [1] = 331, [2] = 333, [3] = 334, [4] = 335, [5] = 336, [6] = 337, [7] = 338, [8] = 339, [9] = 341,
     [10] = 321, [11] = 322, [12] = 323, [13] = 324, [14] = 325, [15] = 326, [16] = 342, [17] = 343, [18] = 344,
@@ -226,43 +326,40 @@ local WEAPON_MODEL = {
     [38] = 362, [39] = 363, [40] = 364, [41] = 365, [42] = 366, [43] = 367, [44] = 368, [45] = 369, [46] = 371,
 }
 local WEAPON_NAME = {
-    [1] = 'Brass Knuckles', [2] = 'Golf Club', [3] = 'Nightstick', [4] = 'Knife', [5] = 'Baseball Bat',
-    [6] = 'Shovel', [7] = 'Pool Cue', [8] = 'Katana', [9] = 'Chainsaw', [14] = 'Flowers', [15] = 'Cane',
-    [16] = 'Grenade', [17] = 'Tear Gas', [18] = 'Molotov', [22] = '9mm', [23] = 'Silenced 9mm',
-    [24] = 'Desert Eagle', [25] = 'Shotgun', [26] = 'Sawn-off', [27] = 'Combat Shotgun', [28] = 'Micro Uzi',
-    [29] = 'MP5', [30] = 'AK-47', [31] = 'M4', [32] = 'Tec-9', [33] = 'Country Rifle', [34] = 'Sniper Rifle',
-    [35] = 'RPG', [36] = 'HS Rocket', [37] = 'Flamethrower', [38] = 'Minigun', [39] = 'Satchel',
-    [41] = 'Spraycan', [42] = 'Extinguisher', [43] = 'Camera', [46] = 'Parachute',
+    [0] = 'Fist', [1] = 'Brass Knuckles', [2] = 'Golf Club', [3] = 'Nightstick', [4] = 'Knife', [5] = 'Baseball Bat',
+    [6] = 'Shovel', [7] = 'Pool Cue', [8] = 'Katana', [9] = 'Chainsaw', [10] = 'Dildo', [11] = 'Dildo', [12] = 'Vibrator',
+    [13] = 'Vibrator', [14] = 'Flowers', [15] = 'Cane', [16] = 'Grenade', [17] = 'Tear Gas', [18] = 'Molotov',
+    [22] = '9mm', [23] = 'Silenced 9mm', [24] = 'Desert Eagle', [25] = 'Shotgun', [26] = 'Sawn-off',
+    [27] = 'Combat Shotgun', [28] = 'Micro Uzi', [29] = 'MP5', [30] = 'AK-47', [31] = 'M4', [32] = 'Tec-9',
+    [33] = 'Country Rifle', [34] = 'Sniper Rifle', [35] = 'RPG', [36] = 'HS Rocket', [37] = 'Flamethrower',
+    [38] = 'Minigun', [39] = 'Satchel', [40] = 'Detonator', [41] = 'Spraycan', [42] = 'Extinguisher',
+    [43] = 'Camera', [44] = 'Night Vision', [45] = 'Thermal', [46] = 'Parachute',
 }
 
-local WICON = {}          -- [weaponId] = ImTextureID (void*)
-local WICON_NEEDED = {}   -- какие оружия нужны меню
-
+local WICON = {}
 local function rd32(addr) return ffi.cast('uint32_t*', addr)[0] end
-
 local function rasterExtOffset()
-    local off = rd32(0xB4E9E0)            -- _RwD3D9RasterExtOffset
+    local off = rd32(0xB4E9E0)
     if off < 0x34 or off > 0x100 then off = 0x34 end
     return off
 end
-
 local function findWeaponIconTexture(modelId)
-    local mi = rd32(0xA9B0C8 + modelId * 4)       -- CModelInfo::ms_modelInfoPtrs
+    local mi = rd32(0xA9B0C8 + modelId * 4)
     if mi == 0 then return nil end
-    local txd = ffi.cast('int16_t*', mi + 0x0A)[0] -- CBaseModelInfo::m_nTxdIndex
+    local txd = ffi.cast('int16_t*', mi + 0x0A)[0]
     if txd < 0 then return nil end
-    local pool = rd32(0xC8800C)                    -- CTxdStore::ms_pTxdPool
+    local pool = rd32(0xC8800C)
     if pool == 0 then return nil end
     local objects, flags = rd32(pool), rd32(pool + 4)
     local size = ffi.cast('int32_t*', pool + 8)[0]
     if objects == 0 or flags == 0 or txd >= size then return nil end
     if bit.band(ffi.cast('uint8_t*', flags)[txd], 0x80) ~= 0 then return nil end
-    local dict = rd32(objects + txd * 0x0C)       -- TxdDef::m_pRwDictionary
+    local dict = rd32(objects + txd * 0x0C)
     if dict == 0 then return nil end
-    local head = dict + 8                          -- RwTexDictionary::texturesInDict
+    local head = dict + 8
     local link, n = rd32(head), 0
     while link ~= 0 and link ~= head and n < 64 do
-        local tex = link - 8                       -- RwTexture::lInDictionary
+        local tex = link - 8
         local raw = ffi.string(ffi.cast('const char*', tex + 0x10), 32)
         local name = (raw:match('^[^%z]*') or ''):lower()
         if name:sub(-4) == 'icon' then
@@ -277,62 +374,56 @@ local function findWeaponIconTexture(modelId)
     return nil
 end
 
-local function needWeapon(id) if WEAPON_MODEL[id] then WICON_NEEDED[id] = true end end
-
 local function refreshWeaponIcons(force)
     local missing = force
-    for wid in pairs(WICON_NEEDED) do
-        if not hasModelLoaded(WEAPON_MODEL[wid]) then missing = true; WICON[wid] = nil end
+    for wid, mid in pairs(WEAPON_MODEL) do
+        if not hasModelLoaded(mid) then missing = true; WICON[wid] = nil end
     end
     if not missing then return end
-    for wid in pairs(WICON_NEEDED) do requestModel(WEAPON_MODEL[wid]) end
+    for _, mid in pairs(WEAPON_MODEL) do requestModel(mid) end
     loadAllModelsNow()
-    for wid in pairs(WICON_NEEDED) do
-        local mid = WEAPON_MODEL[wid]
+    for wid, mid in pairs(WEAPON_MODEL) do
         WICON[wid] = hasModelLoaded(mid) and findWeaponIconTexture(mid) or nil
     end
 end
-
 local function releaseWeaponIcons()
-    for wid in pairs(WICON_NEEDED) do
+    for wid, mid in pairs(WEAPON_MODEL) do
         WICON[wid] = nil
-        pcall(markModelAsNoLongerNeeded, WEAPON_MODEL[wid])
+        pcall(markModelAsNoLongerNeeded, mid)
     end
 end
-
--- рисует иконку оружия, вписанную в квадрат s x s с центром (cx, cy)
 local function WeaponIcon(dl, wid, cx, cy, s, alpha)
-    local tex = WICON[wid]
+    local tex = wid and WICON[wid]
     if not tex then return false end
     dl:AddImage(tex, V(cx - s * 0.5, cy - s * 0.5), V(cx + s * 0.5, cy + s * 0.5), V(0, 0), V(1, 1), C(255, 255, 255, alpha or 255))
     return true
 end
+local function heldWeapon()
+    if doesCharExist(PLAYER_PED) then return getCurrentCharWeapon(PLAYER_PED) end
+    return 0
+end
 
--- ============================================================ НАСТРОЙКИ (единое хранилище)
-local O, DEF = {}, {}
-
+-- ============================================================ НАСТРОЙКИ
 local keyNames = { 'Нет', 'Insert', 'Delete', 'Home', 'End', 'F2', 'F3' }
 local keyCodes = { 0, 0x2D, 0x2E, 0x24, 0x23, 0x71, 0x72 }
 local aaModeItems = { 'Spin', 'Jitter', 'Random', 'Backward' }
 
--- выбор оружия в тулбаре (кнопка «Global» в оригинале)
 local WEAPON_SLOTS = { false, 24, 31, 30, 25, 27, 29, 28, 32, 33, 34 }
 local WEAPON_SLOT_NAMES = { 'Global' }
-for i = 2, #WEAPON_SLOTS do WEAPON_SLOT_NAMES[i] = WEAPON_NAME[WEAPON_SLOTS[i]]; needWeapon(WEAPON_SLOTS[i]) end
+for i = 2, #WEAPON_SLOTS do WEAPON_SLOT_NAMES[i] = WEAPON_NAME[WEAPON_SLOTS[i]] end
 
 DEF.menu_key, DEF.notify, DEF.weapon, DEF.inv_sel = 1, true, 0, 24
 DEF.acc_lang, DEF.acc_menu_scale, DEF.acc_esp_scale, DEF.acc_sync = 0, 0, 0, false
+DEF.esp_box, DEF.esp_name, DEF.esp_hp, DEF.esp_weapon, DEF.esp_dist = true, true, true, true, true
 
 local function slug(s) return (s:lower():gsub('[^%w]+', '_')) end
-
--- конструкторы рядов
-local function T(l, d, key)   return { l = l, kind = 'toggle', def = d or false, key = key } end
-local function DIS(l)         return { l = l, kind = 'disabled' } end
+local function T_(l, d, key) return { l = l, kind = 'toggle', def = d or false, key = key } end
+local function DIS(l) return { l = l, kind = 'disabled' } end
 local function SEL(l, items, d, key) return { l = l, kind = 'select', items = items, def = d or 0, key = key } end
 local function MUL(l, items, mask, key) return { l = l, kind = 'multi', items = items, def = mask or 0, key = key } end
 local function SL(l, mn, mx, d, fmt, float, key) return { l = l, kind = 'slider', min = mn, max = mx, def = d, fmt = fmt, float = float, key = key } end
 local function COL(l, d, rgb) return { l = l, kind = 'color', def = d or false, rgb = rgb or { 102, 124, 246 } } end
-local function CH(l, sub)     return { l = l, kind = 'chevron', sub = sub } end
+local function CH(l, sub) return { l = l, kind = 'chevron', sub = sub } end
 
 local function CARD(id, rows)
     for _, r in ipairs(rows) do
@@ -354,18 +445,19 @@ local HB    = { 'Head', 'Chest', 'Stomach', 'Arms', 'Legs', 'Feet' }
 local COND  = { 'Through Walls', 'Through Smoke', 'In Air', 'Flashed' }
 local CHAMS = { 'Off', 'Solid', 'Flat', 'Water Flow', 'Glass', 'Glow Outline' }
 
--- подменю «Yaw ›» — рабочая крутилка
 local SUB_YAW = { title = 'YAW', rows = CARD('aa', {
     SEL('Mode', aaModeItems, 0, 'aa_mode'),
-    SL('Spin Speed', 1, 90, 25, '%d°', false, 'aa_speed'),
+    SL('Spin Speed', 1, 60, 25, '%d', false, 'aa_speed'),
     SL('Jitter Range', 0, 180, 90, '%d°', false, 'aa_jitter'),
-    T('Disable While Aiming', true, 'aa_noaim'),
+    T_('Show Locally', true, 'aa_local'),
+    T_('Force Sync', true, 'aa_force'),
+    T_('Disable While Aiming', true, 'aa_noaim'),
     SEL('Toggle Key', keyNames, 0, 'aa_key'),
 }) }
 
 local ROWS = {
     rage_main = CARD('rage_main', {
-        T('Enabled', true), T('Silent Aim', true), T('Automatic Fire', true), T('Aim Through Walls', true),
+        T_('Enabled', true), T_('Silent Aim', true), T_('Automatic Fire', true), T_('Aim Through Walls', true),
         SEL('Refine Shot', { 'Off', 'Latency', 'Performance' }, 1),
         SL('Field of View', 0, 180, 180, '%.1f°', true),
     }),
@@ -373,47 +465,44 @@ local ROWS = {
         SEL('History', { 'Off', 'Default', 'Maximum' }, 2),
         SEL('Delay Shot', { 'Off', 'Damage', 'Accuracy' }, 1),
         SEL('Remove Spread', { 'Off', 'Partial', 'Full' }, 2),
-        T('Duck Peek Assist'), T('Quick Peek Assist'), T('Double Tap'),
+        T_('Duck Peek Assist'), T_('Quick Peek Assist'), T_('Double Tap'),
     }),
     rage_sel = CARD('rage_sel', {
         SEL('Prefer', { 'Damage', 'Accuracy', 'Head', 'Body' }, 0),
         MUL('Hitboxes', HB, 0x07),
         SL('Hit Chance', 0, 100, 0, '%d%%'),
         SL('Min Damage', 0, 130, 112, fmtMinDmg),
-        T('Quick Stop'), T('Quick Scope'),
+        T_('Quick Stop'), T_('Quick Scope'),
     }),
     rage_aa = CARD('rage_aa', {
-        T('Enabled', false, 'aa_enable'),
-        T('Suppress Breathing Animations', true),
+        T_('Enabled', false, 'aa_enable'),
+        T_('Suppress Breathing Animations', true),
         SEL('Leg Movement', { 'Default', 'Walking', 'Sliding' }, 1),
         CH('Pitch'), CH('Yaw', SUB_YAW), CH('Mouse Override'),
     }),
-
-    legit_main = CARD('legit_main', { T('Enabled') }),
+    legit_main = CARD('legit_main', { T_('Enabled') }),
     legit_aim = CARD('legit_aim', {
-        T('Enabled'), SEL('Activation', { 'Always', 'Assisted', 'On Key' }, 1),
+        T_('Enabled'), SEL('Activation', { 'Always', 'Assisted', 'On Key' }, 1),
         MUL('Conditions', COND, 0x03), MUL('Hitboxes', HB, 0x01),
         SL('Field of View', 0, 150, 20, '%du'), SL('Smoothing', 0, 100, 50, '%d%%'),
         SL('Reaction Time', 0, 500, 0, '%dms'), SL('Min Damage', 0, 130, 101, fmtMinDmg),
-        T('Recoil Control'), T('Quick Scope'), T('Quick Stop'),
+        T_('Recoil Control'), T_('Quick Scope'), T_('Quick Stop'),
     }),
     legit_trig = CARD('legit_trig', {
-        T('Enabled'), MUL('Conditions', COND, 0x03), MUL('Hitboxes', HB, 0x07),
+        T_('Enabled'), MUL('Conditions', COND, 0x03), MUL('Hitboxes', HB, 0x07),
         SL('Hit Chance', 0, 100, 92, '%d%%'), SL('Min Damage', 0, 130, 101, fmtMinDmg),
         SL('Reaction Time', 0, 500, 0, '%dms'), SL('Burst Time', 0, 500, 50, '%dms'),
-        T('Quick Scope'),
+        T_('Quick Scope'),
     }),
     legit_other = CARD('legit_other', {
-        T('Visualize'), T('Automatic Weapons'), T('Standalone Recoil Control'),
+        T_('Visualize'), T_('Automatic Weapons'), T_('Standalone Recoil Control'),
         SEL('Randomize', { 'None', 'Low', 'Medium', 'High' }, 0),
     }),
-
-    pl_enemy = CARD('pl_enemy', { T('Enabled', true), COL('Offscreen Arrow'), COL('Sounds') }),
+    pl_enemy = CARD('pl_enemy', { T_('Enabled', true), COL('Offscreen Arrow', true), COL('Sounds') }),
     pl_model = CARD('pl_model', {
         SEL('Player', CHAMS, 3), SEL('Behind Walls', CHAMS, 5), SEL('On Shot', CHAMS, 1), SEL('History', CHAMS, 1),
         DIS('Ragdolls'), COL('Soul Particles'), COL('Glow', true),
     }),
-
     w_view = CARD('w_view', {
         CH('View Options'), CH('Scope Options'), CH('Viewmodel Options'), CH('Perspective Options'),
         MUL('Unlock Spectating', { 'Perspective', 'Enemies', 'Teammates' }, 0x03),
@@ -426,32 +515,24 @@ local ROWS = {
     }),
     w_esp = CARD('w_esp', {
         CH('Bomb'), CH('Weapons'), CH('Hostages'), CH('Grenades'),
-        T('Grenade Trajectory', true), T('Grenade Proximity Warnings', true),
+        T_('Grenade Trajectory', true), T_('Grenade Proximity Warnings', true),
     }),
     w_misc = CARD('w_misc', {
         CH('Windows'), CH('Removals'), CH('Ambience'), CH('Hit Marker'), CH('Bullet Tracers'), COL('Bullet Impacts', true),
     }),
-
     m_move = CARD('m_move', {
-        T('Bunny Hop', true), T('Air Strafe', true), T('Jump Bug', true), T('Standalone Quick Stop', true),
-        T('Strafe Assist', true), T('Edge Jump'), T('Slow Walk'), T('Fast Ladder', true),
+        T_('Bunny Hop', true), T_('Air Strafe', true), T_('Jump Bug', true), T_('Standalone Quick Stop', true),
+        T_('Strafe Assist', true), T_('Edge Jump'), T_('Slow Walk'), T_('Fast Ladder', true),
     }),
     m_feat = CARD('m_feat', {
-        T('Quick Switch', true), T('Super Toss'), DIS('Knife Bot'), T('Prevent AFK Kick', true), T('Hit Sound', true),
-        T('Automatic Purchase'), T('Automatic Grenade Release', true), T('Auto-Accept Matchmaking', true),
+        T_('Quick Switch', true), T_('Super Toss'), DIS('Knife Bot'), T_('Prevent AFK Kick', true), T_('Hit Sound', true),
+        T_('Automatic Purchase'), T_('Automatic Grenade Release', true), T_('Auto-Accept Matchmaking', true),
         MUL('Log Events', { 'Damage Dealt', 'Damage Taken', 'Purchases', 'Deaths' }, 0x03),
     }),
 }
 
--- Inventory: 5 рядов x 3 колонки (Pistols / Mid-Tier / Rifles) + 2x3 снизу слева
-local INV_COLS = {
-    { 22, 23, 24, 28, 32 },   -- Pistols
-    { 25, 26, 27, 29, 33 },   -- Mid-Tier
-    { 30, 31, 34, 35, 38 },   -- Rifles
-}
+local INV_COLS = { { 22, 23, 24, 28, 32 }, { 25, 26, 27, 29, 33 }, { 30, 31, 34, 35, 38 } }
 local INV_SMALL = { 4, 8, 5, 16, 18, 9 }
-for _, col in ipairs(INV_COLS) do for _, w in ipairs(col) do needWeapon(w) end end
-for _, w in ipairs(INV_SMALL) do needWeapon(w) end
 
 local function resetOptions() for k, v in pairs(DEF) do O[k] = v end end
 resetOptions()
@@ -469,17 +550,14 @@ local function loadConfig()
     end
     return true
 end
-
 local function actSave()  saveConfig(); chat('конфиг сохранён') end
 local function actLoad()  if loadConfig() then chat('конфиг загружен') else chat('конфиг не найден') end end
 local function actReset() resetOptions(); chat('настройки сброшены') end
 
 -- ============================================================ ПОПАПЫ
--- popup: стеклянный список. get(i) -> выбран?, set(i) -> клик (true = закрыть)
-local popup = { open = false, owner = nil, frame = 0, x = 0, y = 0, w = 134, ah = 23,
-                rx = 0, ry = 0, rw = 0, rh = 0 }
+local popup = { open = false, owner = nil, frame = 0, x = 0, y = 0, w = 134, ah = 23, rx = 0, ry = 0, rw = 0, rh = 0 }
 local account = { open = false, frame = 0 }
-local sub = { open = false, frame = 0, def = nil, x = 0, y = 0, ax = 0, ay = 0, aw = 0, ah = 0 }
+local sub = { open = false, frame = 0, def = nil, ax = 0, ay = 0, aw = 0, ah = 0 }
 
 local function OpenPopup(owner, items, get, set, x, y, w, ah, icons)
     local same = popup.open and popup.owner == owner
@@ -488,28 +566,26 @@ local function OpenPopup(owner, items, get, set, x, y, w, ah, icons)
     popup.x, popup.y, popup.w, popup.ah = x, y, w, ah or 23
     popup.frame = imgui.GetFrameCount()
 end
-
 local function hasBit(m, i) return bit.band(m, bit.lshift(1, i - 1)) ~= 0 end
-
 local function OpenRowPopup(id, row, x, y, w)
     local key = row.key
     if row.kind == 'multi' then
-        OpenPopup(id, row.items,
-            function(i) return hasBit(O[key], i) end,
-            function(i) O[key] = bit.bxor(O[key], bit.lshift(1, i - 1)); return false end,
-            x, y, 134, 23)
+        OpenPopup(id, row.items, function(i) return hasBit(O[key], i) end,
+            function(i) O[key] = bit.bxor(O[key], bit.lshift(1, i - 1)); return false end, x, y, 134, 23)
     else
-        OpenPopup(id, row.items,
-            function(i) return O[key] == i - 1 end,
-            function(i) O[key] = i - 1; return true end,
-            x, y, w, 23)
+        OpenPopup(id, row.items, function(i) return O[key] == i - 1 end,
+            function(i) O[key] = i - 1; return true end, x, y, w, 23)
     end
 end
-
 local function multiText(row)
     local t = {}
-    for i, n in ipairs(row.items) do if hasBit(O[row.key], i) then t[#t + 1] = n end end
-    return #t > 0 and table.concat(t, ', ') or 'None'
+    for i, n in ipairs(row.items) do if hasBit(O[row.key], i) then t[#t + 1] = L(n) end end
+    return #t > 0 and table.concat(t, ', ') or L('None')
+end
+local function OpenWeaponPopup(owner, x, y, ah)
+    OpenPopup(owner, WEAPON_SLOT_NAMES, function(i) return O.weapon == i - 1 end,
+        function(i) O.weapon = i - 1; if WEAPON_SLOTS[i] then O.inv_sel = WEAPON_SLOTS[i] end; return true end,
+        x, y, 200, ah, WEAPON_SLOTS)
 end
 
 -- ============================================================ ВИДЖЕТЫ
@@ -535,17 +611,44 @@ local function OpenSub(id, def, ax, ay, aw, ah)
     popup.open = false
 end
 
+-- кнопка выбора оружия с настоящей иконкой (тулбар и Legit)
+local function WeaponPicker(dl, id, x, y, minW, h, maxW)
+    local wid = WEAPON_SLOTS[O.weapon + 1]
+    local label = L(WEAPON_SLOT_NAMES[O.weapon + 1] or 'Global')
+    local iconWid = wid or heldWeapon()
+    local hasIcon = iconWid and WICON[iconWid] ~= nil
+    local tx = hasIcon and 40 or 13
+    local w = math.max(minW, tx + TextSize(label, F.ctrl).x + 30)
+    if maxW then w = math.min(w, maxW) end
+    if Hit(id, x, y, w, h) then OpenWeaponPopup(id, x, y, h) end
+    local r = Motion(id .. '#hv', (imgui.IsItemHovered() or (popup.open and popup.owner == id)) and 1 or 0)
+    dl:AddRectFilled(V(x, y), V(x + w, y + h), Mix({ 17, 19, 27 }, { 22, 25, 35 }, r), 6)
+    dl:AddRect(V(x, y), V(x + w, y + h), Mix({ 28, 31, 41 }, { 75, 126, 255 }, r * 0.7), 6)
+    if hasIcon then WeaponIcon(dl, iconWid, x + 21, y + h * 0.5, h - 4, wid and 255 or 150) end
+    dl:PushClipRect(V(x, y), V(x + w - 20, y + h), true)
+    TextY(dl, x + tx, y, h, C(184, 187, 197), label, F.ctrl)
+    dl:PopClipRect()
+    Chevron(dl, x + w - 17, y + h * 0.5 - 4, C(130, 135, 146))
+    return w
+end
+
 local function RowControl(dl, cx, y, w, row, id)
     local kind = row.kind
     local disabled = kind == 'disabled'
-    TextY(dl, cx + 13, y, 37, disabled and C(92, 96, 107) or C(207, 209, 218), row.l, F.body)
+    -- ширина под подпись (чтобы длинный русский текст не залезал на контрол)
+    local lw = w - 60
+    if kind == 'select' or kind == 'multi' then lw = w - math.min(134, w * 0.48) - 22
+    elseif kind == 'slider' then lw = w - 160
+    elseif kind == 'color' then lw = w - 75
+    elseif kind == 'chevron' then lw = w - 35 end
+    dl:PushClipRect(V(cx, y), V(cx + lw, y + 37), true)
+    TextY(dl, cx + 13, y, 37, disabled and C(92, 96, 107) or C(207, 209, 218), L(row.l), F.body)
+    dl:PopClipRect()
 
     if kind == 'toggle' then
         Toggle(dl, id, cx + w - 43, y + 9, row.key)
-
     elseif disabled then
         Toggle(dl, id, cx + w - 43, y + 9, nil, false)
-
     elseif kind == 'select' or kind == 'multi' then
         local cw = math.min(134, w * 0.48)
         local px, py = cx + w - cw - 13, y + 7
@@ -554,13 +657,12 @@ local function RowControl(dl, cx, y, w, row, id)
         if click then OpenRowPopup(id, row, px, py, cw) end
         dl:AddRectFilled(V(px, py), V(px + cw, py + 23), Mix({ 25, 28, 38 }, { 31, 38, 54 }, r), 5)
         dl:AddRect(V(px, py), V(px + cw, py + 23), Mix({ 32, 35, 46 }, { 75, 126, 255 }, r), 5)
-        local value = kind == 'multi' and multiText(row) or row.items[O[row.key] + 1] or 'Select'
+        local value = kind == 'multi' and multiText(row) or L(row.items[O[row.key] + 1]) or 'Select'
         dl:PushClipRect(V(px, py), V(px + cw - 17, py + 23), true)
         TextY(dl, px + 7, py, 23, C(170, 173, 184), value, F.ctrl)
         dl:PopClipRect()
         dl:AddLine(V(px + cw - 13, py + 9), V(px + cw - 9, py + 13), C(139, 143, 154), 1)
         dl:AddLine(V(px + cw - 9, py + 13), V(px + cw - 5, py + 9), C(139, 143, 154), 1)
-
     elseif kind == 'slider' then
         local key = row.key
         local txt = type(row.fmt) == 'function' and row.fmt(O[key]) or string.format(row.fmt, O[key])
@@ -570,13 +672,12 @@ local function RowControl(dl, cx, y, w, row, id)
         local sx, sy = plx - 10 - tw, y + 18
         Hit(id, sx - 5, sy - 8, tw + 10, 19)
         if imgui.IsItemActive() then
-            local t = clamp((imgui.GetMousePos().x - sx) / tw, 0, 1)
+            local t = clamp((Mouse().x - sx) / tw, 0, 1)
             local nv = row.min + (row.max - row.min) * t
             if not row.float then nv = math.floor(nv + 0.5) end
             O[key] = nv
         end
-        local target = clamp((O[key] - row.min) / (row.max - row.min), 0, 1)
-        local shown = Motion(id .. '#v', target, 14)
+        local shown = Motion(id .. '#v', clamp((O[key] - row.min) / (row.max - row.min), 0, 1), 14)
         dl:AddRectFilled(V(sx, sy), V(sx + tw, sy + 3), C(34, 38, 48), 2)
         dl:AddRectFilled(V(sx, sy), V(sx + tw * shown, sy + 3), C(75, 126, 255), 2)
         dl:AddCircleFilled(V(sx + tw * shown, sy + 1.5), 5.5, C(247, 248, 252), 24)
@@ -584,12 +685,10 @@ local function RowControl(dl, cx, y, w, row, id)
         dl:AddRectFilled(V(plx, ply), V(plx + pw, ply + 21), C(25, 28, 38), 5)
         local tsz = TextSize(txt, F.ctrl)
         TextY(dl, plx + (pw - tsz.x) * 0.5, ply, 21, C(166, 169, 179), txt, F.ctrl)
-
     elseif kind == 'color' then
         local c = row.rgb
         dl:AddRectFilled(V(cx + w - 63, y + 11), V(cx + w - 48, y + 26), C(c[1], c[2], c[3]), 5)
         Toggle(dl, id, cx + w - 43, y + 9, row.key)
-
     elseif kind == 'chevron' then
         if row.sub then
             local click = Hit(id, cx + 4, y + 3, w - 8, 31)
@@ -602,7 +701,7 @@ local function RowControl(dl, cx, y, w, row, id)
 end
 
 local function Card(dl, key, x, y, w, h, title, rows)
-    Text(dl, x + 12, y - 18, C(89, 94, 106), title, F.cap)
+    Text(dl, x + 12, y - 18, C(89, 94, 106), L(title), F.cap)
     dl:AddRectFilled(V(x, y), V(x + w, y + h), C(17, 19, 27, 224), 14)
     dl:AddRect(V(x, y), V(x + w, y + h), C(31, 34, 44), 14)
     for i, row in ipairs(rows) do
@@ -612,54 +711,72 @@ local function Card(dl, key, x, y, w, h, title, rows)
     end
 end
 
--- солдат-превью (Players / Inventory) — 1:1 из оригинала
-local function Soldier(dl, x, y)
-    local function P(a, b) return V(x + a, y + b) end
-    local blue, edge, dark = C(91, 133, 255, 210), C(211, 220, 255, 235), C(39, 49, 77, 245)
-    dl:AddCircleFilled(P(0, -120), 22, dark, 32); dl:AddCircle(P(0, -120), 22, edge, 32, 2)
-    dl:AddRectFilled(P(-29.5, -97.5), P(29.5, -23.5), blue, 13.5)
-    dl:AddRectFilled(P(-26.5, -94.5), P(26.5, -26.5), dark, 10.5)
-    dl:AddQuadFilled(P(-25, -85), P(-48, -30), P(-37, -22), P(-10, -66), dark)
-    dl:AddQuadFilled(P(25, -85), P(51, -45), P(41, -35), P(10, -66), dark)
-    dl:AddRectFilled(P(-23, -25), P(-4, 60), dark, 8); dl:AddRectFilled(P(4, -25), P(23, 60), dark, 8)
-    dl:AddLine(P(-55, -42), P(62, -53), edge, 5); dl:AddRectFilled(P(30, -58), P(77, -49), blue, 2)
-    dl:AddCircle(P(0, -120), 10, blue, 32, 2); dl:AddLine(P(-20, -115), P(20, -115), blue, 2)
-    dl:AddLine(P(-35, 62), P(-4, 62), edge, 3); dl:AddLine(P(4, 62), P(35, 62), edge, 3)
+-- ============================================================ ФИГУРА ИГРОКА (превью)
+-- части: {тип, ..., слой}. c = капсула (x1,y1,x2,y2,r), o = круг (x,y,r), q = четырёхугольник
+local BODY = {
+    { 'c', -34, -242, -44, -192, 8, 'back' }, { 'c', -44, -192, -41, -142, 7, 'back' }, { 'o', -41, -136, 7, 'back' },
+    { 'c', -13, -150, -16, -78, 11, 'back' }, { 'c', -16, -78, -18, -12, 9, 'back' }, { 'c', -17, -5, -31, -3, 5, 'back' },
+    { 'c', 13, -150, 16, -78, 11, 'mid' }, { 'c', 16, -78, 18, -12, 9, 'mid' }, { 'c', 17, -5, 31, -3, 5, 'mid' },
+    { 'q', -34, -250, 34, -250, 23, -162, -23, -162, 'mid' },
+    { 'c', -29, -245, 29, -245, 9, 'mid' }, { 'c', -22, -165, 22, -165, 10, 'mid' },
+    { 'c', 0, -168, 0, -146, 22, 'mid' },
+    { 'c', 34, -242, 45, -192, 8, 'front' }, { 'c', 45, -192, 42, -142, 7, 'front' }, { 'o', 42, -136, 7, 'front' },
+    { 'c', 0, -265, 0, -250, 7, 'front' }, { 'o', 0, -283, 17, 'front' },
+}
+local GLOW_SHAPE = {
+    { 'o', 0, -283, 17 }, { 'c', 0, -240, 0, -160, 30 }, { 'c', -40, -240, -42, -140, 8 }, { 'c', 40, -240, 43, -140, 8 },
+    { 'c', -14, -150, -18, -8, 11 }, { 'c', 14, -150, 18, -8, 11 },
+}
+
+local function partDraw(dl, p, cx, fy, s, col, grow)
+    grow = grow or 0
+    if p[1] == 'c' then
+        local x1, y1, x2, y2, r = cx + p[2] * s, fy + p[3] * s, cx + p[4] * s, fy + p[5] * s, (p[6] + grow) * s
+        dl:AddLine(V(x1, y1), V(x2, y2), col, r * 2)
+        dl:AddCircleFilled(V(x1, y1), r, col, 20); dl:AddCircleFilled(V(x2, y2), r, col, 20)
+    elseif p[1] == 'o' then
+        dl:AddCircleFilled(V(cx + p[2] * s, fy + p[3] * s), (p[4] + grow) * s, col, 28)
+    elseif p[1] == 'q' and grow == 0 then
+        dl:AddQuadFilled(V(cx + p[2] * s, fy + p[3] * s), V(cx + p[4] * s, fy + p[5] * s),
+            V(cx + p[6] * s, fy + p[7] * s), V(cx + p[8] * s, fy + p[9] * s), col)
+    end
 end
 
--- ячейка оружия: фон/рамка/полоса редкости как в оригинале + реальная иконка оружия
-local function WeaponCell(dl, id, x, y, w, h, wid, accent)
-    local click = Hit(id, x, y, w, h)
-    local hov = Motion(id .. '#hv', imgui.IsItemHovered() and 1 or 0, 18)
-    local sel = Motion(id .. '#sel', O.inv_sel == wid and 1 or 0, 18)
-    if click then
-        O.inv_sel = wid
-        for i = 2, #WEAPON_SLOTS do if WEAPON_SLOTS[i] == wid then O.weapon = i - 1 end end
-    end
-
-    dl:AddRectFilled(V(x, y), V(x + w, y + h), Mix({ 24, 31, 45, 235 }, { 30, 39, 57, 245 }, hov), 9)
-    dl:AddRect(V(x, y), V(x + w, y + h), Mix({ 35, 45, 62 }, { 75, 126, 255 }, math.max(sel, hov * 0.5)), 9)
-    dl:AddRectFilled(V(x, y + h - 3), V(x + w, y + h), C(accent[1], accent[2], accent[3]), 0)
-
-    local s = math.min(w - 12, h - 10)
-    if not WeaponIcon(dl, wid, x + w * 0.5, y + (h - 3) * 0.5, s) then
-        -- фолбэк, пока иконка не загрузилась: оригинальная векторная пушка
-        local gun, shade = C(218, 220, 218), C(104, 111, 118)
-        local k = math.min(w / 121, h / 91)
-        local function q(a, b) return V(x + a * k, y + b * k) end
-        local kind = wid % 3
-        if kind == 0 then
-            dl:AddRectFilled(q(25, 28), q(86, 36), gun, 2 * k); dl:AddRectFilled(q(67, 35), q(77, 60), shade, 2 * k)
-            dl:AddRectFilled(q(32, 35), q(41, 55), gun, 2 * k)
-        elseif kind == 1 then
-            dl:AddLine(q(18, 55), q(94, 27), gun, 7 * k); dl:AddRectFilled(q(70, 27), q(90, 35), shade, 2 * k)
-        else
-            dl:AddRectFilled(q(16, 32), q(96, 39), gun, 2 * k); dl:AddRectFilled(q(30, 39), q(42, 61), shade, 2 * k)
-            dl:AddRectFilled(q(67, 39), q(77, 57), gun, 2 * k)
+-- look: индекс CHAMS (0 Off, 1 Solid, 2 Flat, 3 Water Flow, 4 Glass, 5 Glow Outline)
+local function Figure(dl, cx, fy, s, look, glow)
+    local t = os.clock()
+    -- мягкое свечение
+    if glow then
+        for i = 4, 1, -1 do
+            for _, p in ipairs(GLOW_SHAPE) do partDraw(dl, p, cx, fy, s, C(102, 124, 246, 16), i * 3) end
         end
     end
-    if hov > 0.01 and w > 80 then
-        Text(dl, x + 8, y + 5, C(205, 209, 219, 255 * hov), WEAPON_NAME[wid] or ('#' .. wid), F.small)
+    if look == 5 then -- контур
+        for _, p in ipairs(GLOW_SHAPE) do partDraw(dl, p, cx, fy, s, C(122, 150, 255, 235), 2.5) end
+    end
+    local function colFor(p)
+        local layer = p[#p]
+        local shade = layer == 'back' and 0.72 or (layer == 'front' and 1.08 or 1)
+        local r, g, b
+        if look == 0 then r, g, b = 70, 76, 94
+        elseif look == 1 then r, g, b = 91, 133, 255
+        elseif look == 2 then r, g, b = 110, 140, 255; shade = 1
+        elseif look == 3 then
+            local py = p[3] or 0
+            local k = 0.5 + 0.5 * math.sin(t * 3 + py * 0.03)
+            r, g, b = 60 + 40 * k, 120 + 90 * k, 255
+        elseif look == 4 then r, g, b = 86, 112, 168
+        else r, g, b = 26, 32, 52 end
+        return C(math.min(255, r * shade), math.min(255, g * shade), math.min(255, b * shade), 250)
+    end
+    for _, layer in ipairs({ 'back', 'mid', 'front' }) do
+        for _, p in ipairs(BODY) do
+            if p[#p] == layer then partDraw(dl, p, cx, fy, s, colFor(p)) end
+        end
+    end
+    if look == 4 then -- блики стекла
+        dl:AddLine(V(cx - 22 * s, fy - 240 * s), V(cx - 14 * s, fy - 175 * s), C(255, 255, 255, 70), 2 * s)
+        dl:AddCircle(V(cx, fy - 283 * s), 13 * s, C(255, 255, 255, 60), 24, 1.5 * s)
     end
 end
 
@@ -676,6 +793,8 @@ end
 
 PAGES.legit = function(dl, b)
     Card(dl, 'l1', b.x + 167, b.y + 84, 281, 40, 'MAIN', ROWS.legit_main)
+    -- виджет оружия в карточке MAIN (между подписью и тумблером)
+    WeaponPicker(dl, '##legit_weapon', b.x + 167 + 100, b.y + 84 + 7, 128, 26, 128)
     Card(dl, 'l2', b.x + 167, b.y + 160, 281, 401, 'AIMBOT', ROWS.legit_aim)
     Card(dl, 'l3', b.x + 458, b.y + 84, 277, 297, 'TRIGGERBOT', ROWS.legit_trig)
     Card(dl, 'l4', b.x + 458, b.y + 413, 277, 148, 'OTHER', ROWS.legit_other)
@@ -690,20 +809,109 @@ local function localIdentity()
     return name, id
 end
 
+local ESP_CHIPS = { { 'Box', 'esp_box' }, { 'Name', 'esp_name' }, { 'HP', 'esp_hp' }, { 'Weapon', 'esp_weapon' }, { 'Dist', 'esp_dist' } }
+
+local function cornerBox(dl, x1, y1, x2, y2, col)
+    local lw, lh = (x2 - x1) * 0.28, (y2 - y1) * 0.16
+    local function seg(ax, ay, bx2, by2)
+        dl:AddLine(V(ax, ay), V(bx2, by2), C(0, 0, 0, 170), 3)
+        dl:AddLine(V(ax, ay), V(bx2, by2), col, 1.2)
+    end
+    seg(x1, y1, x1 + lw, y1); seg(x1, y1, x1, y1 + lh)
+    seg(x2, y1, x2 - lw, y1); seg(x2, y1, x2, y1 + lh)
+    seg(x1, y2, x1 + lw, y2); seg(x1, y2, x1, y2 - lh)
+    seg(x2, y2, x2 - lw, y2); seg(x2, y2, x2, y2 - lh)
+end
+
 PAGES.players = function(dl, b)
     Card(dl, 'p1', b.x + 177, b.y + 86, 300, 116, 'ENEMY', ROWS.pl_enemy)
     Card(dl, 'p2', b.x + 177, b.y + 239, 300, 264, 'ENEMY MODEL', ROWS.pl_model)
-    Text(dl, b.x + 557, b.y + 75, C(111, 167, 255), 'Enemies', F.ctrl)
-    Icon(dl, 'user', b.x + 654, b.y + 75, 16, C(180, 184, 194))
-    Icon(dl, 'list', b.x + 706, b.y + 75, 16, C(180, 184, 194))
-    Soldier(dl, b.x + 626, b.y + 438)
-    local name = localIdentity()
-    Text(dl, b.x + 609, b.y + 116, C(255, 112, 135), 'C4', F.t8)
-    local nw = TextSize(name, F.t9).x
-    Text(dl, b.x + 626 - nw * 0.5, b.y + 128, C(253, 213, 90), name, F.t9)
-    Text(dl, b.x + 612, b.y + 141, C(227, 231, 241), '65%', F.t8)
-    dl:AddRectFilled(V(b.x + 535, b.y + 495), V(b.x + 715, b.y + 499), C(34, 38, 48), 2)
-    dl:AddRectFilled(V(b.x + 535, b.y + 495), V(b.x + 640, b.y + 499), C(75, 126, 255), 2)
+
+    -- панель превью
+    local x1, y1, x2, y2 = b.x + 490, b.y + 68, b.x + 736, b.y + 561
+    dl:AddRectFilled(V(x1, y1), V(x2, y2), C(15, 18, 27, 235), 14)
+    dl:AddRectFilledMultiColor(V(x1 + 1, y1 + 36), V(x2 - 1, y2 - 60),
+        C(30, 42, 70, 60), C(30, 42, 70, 60), C(15, 18, 27, 0), C(15, 18, 27, 0))
+    dl:AddRect(V(x1, y1), V(x2, y2), C(31, 34, 44), 14)
+    Text(dl, x1 + 16, y1 + 10, C(111, 167, 255), L('Enemies'), F.ctrl)
+    local ew = TextSize(L('Enemies'), F.ctrl).x
+    dl:AddRectFilled(V(x1 + 16, y1 + 30), V(x1 + 16 + ew, y1 + 32), C(75, 126, 255), 1)
+    Icon(dl, 'user', x2 - 52, y1 + 2, 32, C(180, 184, 194))
+    Icon(dl, 'list', x2 - 26, y1 + 2, 32, C(180, 184, 194))
+    dl:AddLine(V(x1 + 12, y1 + 36), V(x2 - 12, y1 + 36), C(28, 31, 40))
+
+    local espS = ESP_SCALES[(O.acc_esp_scale or 0) + 1] or 1
+    local cx, fy, s = (x1 + x2) * 0.5, b.y + 452, 0.9 * espS
+    local enabled = O.pl_enemy_enabled
+
+    -- пол и подсветка под ногами
+    for i = 1, 5 do
+        dl:AddRectFilled(V(cx - (70 - i * 9) * s, fy - 2 - i * 0.6), V(cx + (70 - i * 9) * s, fy + 4 + i * 0.6), C(75, 126, 255, 10), 6)
+    end
+    if O.pl_enemy_sounds and enabled then
+        local k = (os.clock() * 0.8) % 1
+        dl:AddCircle(V(cx, fy), 20 + 50 * k, C(102, 124, 246, 140 * (1 - k)), 40, 1.5)
+    end
+
+    Figure(dl, cx, fy, s, O.pl_model_player or 3, O.pl_model_glow)
+
+    if enabled then
+        local bx1, by1, bx2, by2 = cx - 62 * s, fy - 306 * s, cx + 62 * s, fy + 8 * s
+        if O.esp_box then cornerBox(dl, bx1, by1, bx2, by2, C(235, 238, 255)) end
+        if O.esp_hp then
+            local hp = 0.5 + 0.35 * (0.5 + 0.5 * math.sin(os.clock() * 0.9))
+            local hx = bx1 - 7
+            dl:AddRectFilled(V(hx - 1, by1 - 1), V(hx + 4, by2 + 1), C(0, 0, 0, 180), 2)
+            local top = by2 - (by2 - by1) * hp
+            dl:AddRectFilledMultiColor(V(hx, top), V(hx + 3, by2),
+                C(120, 255, 140), C(120, 255, 140), C(255, 200, 70), C(255, 200, 70))
+            Text(dl, hx - 22, top - 6, C(200, 255, 210), tostring(math.floor(hp * 100)), F.t9)
+        end
+        if O.esp_name then
+            local name = localIdentity()
+            local nw = TextSize(name, F.small).x
+            Text(dl, cx - nw * 0.5 + 1, by1 - 18 + 1, C(0, 0, 0, 200), name, F.small)
+            Text(dl, cx - nw * 0.5, by1 - 18, C(240, 242, 250), name, F.small)
+        end
+        local wy = by2 + 6
+        if O.esp_weapon then
+            local wid = WEAPON_SLOTS[O.weapon + 1] or 24
+            local wn = WEAPON_NAME[wid] or ''
+            if WeaponIcon(dl, wid, cx, wy + 12, 26) then wy = wy + 24 end
+            local ww = TextSize(wn, F.t9).x
+            Text(dl, cx - ww * 0.5, wy, C(190, 196, 214), wn, F.t9)
+        end
+        if O.esp_dist then
+            Text(dl, bx2 + 6, by2 - 12, C(160, 166, 184), '24m', F.t9)
+        end
+        if O.pl_enemy_offscreen_arrow then
+            local ay = (y1 + y2) * 0.5 - 40
+            local pulse = 0.6 + 0.4 * math.sin(os.clock() * 4)
+            dl:AddTriangleFilled(V(x1 + 14, ay), V(x1 + 28, ay - 9), V(x1 + 28, ay + 9), C(102, 124, 246, 230 * pulse))
+        end
+        if O.pl_model_soul_particles then
+            for i = 1, 6 do
+                local k = (os.clock() * 0.35 + i / 6) % 1
+                local px = cx + math.sin(i * 1.7 + os.clock()) * 30 * s
+                dl:AddCircleFilled(V(px, fy - k * 300 * s), 2, C(150, 170, 255, 200 * (1 - k)), 10)
+            end
+        end
+    end
+
+    -- чипы элементов ESP (кликабельные)
+    local cxp, cyp = x1 + 12, y2 - 40
+    for i, ch in ipairs(ESP_CHIPS) do
+        local label = L(ch[1])
+        local cw = TextSize(label, F.small).x + 14
+        local click = Hit('##chip' .. i, cxp, cyp, cw, 24)
+        local hv = Motion('chip#hv' .. i, imgui.IsItemHovered() and 1 or 0, 20)
+        local on = Motion('chip#on' .. i, O[ch[2]] and 1 or 0, 18)
+        if click then O[ch[2]] = not O[ch[2]] end
+        dl:AddRectFilled(V(cxp, cyp), V(cxp + cw, cyp + 24), Mix({ 25, 28, 38 }, { 34, 52, 96 }, on), 8)
+        dl:AddRect(V(cxp, cyp), V(cxp + cw, cyp + 24), Mix({ 32, 35, 46 }, { 75, 126, 255 }, math.max(on, hv * 0.6)), 8)
+        TextY(dl, cxp + 7, cyp, 24, Mix({ 140, 145, 158 }, { 226, 232, 255 }, on), label, F.small)
+        cxp = cxp + cw + 5
+    end
 end
 
 PAGES.world = function(dl, b)
@@ -715,20 +923,52 @@ end
 
 local ACCENTS = { { 235, 237, 239 }, { 171, 70, 255 }, { 75, 116, 255 }, { 226, 43, 192 }, { 251, 65, 83 }, { 134, 72, 255 } }
 
+local function WeaponCell(dl, id, x, y, w, h, wid, accent)
+    local click = Hit(id, x, y, w, h)
+    local hov = Motion(id .. '#hv', imgui.IsItemHovered() and 1 or 0, 18)
+    local sel = Motion(id .. '#sel', O.inv_sel == wid and 1 or 0, 18)
+    if click then
+        O.inv_sel = wid
+        for i = 2, #WEAPON_SLOTS do if WEAPON_SLOTS[i] == wid then O.weapon = i - 1 end end
+    end
+    dl:AddRectFilled(V(x, y), V(x + w, y + h), Mix({ 24, 31, 45, 235 }, { 30, 39, 57, 245 }, hov), 9)
+    dl:AddRect(V(x, y), V(x + w, y + h), Mix({ 35, 45, 62 }, { 75, 126, 255 }, math.max(sel, hov * 0.5)), 9)
+    dl:AddRectFilled(V(x, y + h - 3), V(x + w, y + h), C(accent[1], accent[2], accent[3]), 0)
+    local s = math.min(w - 12, h - 10)
+    if not WeaponIcon(dl, wid, x + w * 0.5, y + (h - 3) * 0.5, s) then
+        local gun, shade = C(218, 220, 218), C(104, 111, 118)
+        local k = math.min(w / 121, h / 91)
+        local function q(a, b2) return V(x + a * k, y + b2 * k) end
+        local kind = wid % 3
+        if kind == 0 then
+            dl:AddRectFilled(q(25, 28), q(86, 36), gun, 2 * k); dl:AddRectFilled(q(67, 35), q(77, 60), shade, 2 * k)
+            dl:AddRectFilled(q(32, 35), q(41, 55), gun, 2 * k)
+        elseif kind == 1 then
+            dl:AddLine(q(18, 55), q(94, 27), gun, 7 * k); dl:AddRectFilled(q(70, 27), q(90, 35), shade, 2 * k)
+        else
+            dl:AddRectFilled(q(16, 32), q(96, 39), gun, 2 * k); dl:AddRectFilled(q(30, 39), q(42, 61), shade, 2 * k)
+            dl:AddRectFilled(q(67, 39), q(77, 57), gun, 2 * k)
+        end
+    end
+    if hov > 0.01 and w > 80 then
+        Text(dl, x + 8, y + 5, C(205, 209, 219, 255 * hov), WEAPON_NAME[wid] or ('#' .. wid), F.small)
+    end
+end
+
 PAGES.inventory = function(dl, b)
     dl:AddRectFilled(V(b.x + 159, b.y + 57), V(b.x + 747, b.y + 575), C(17, 27, 42, 155), 0)
     dl:AddRectFilled(V(b.x + 185, b.y + 66), V(b.x + 286, b.y + 91), C(20, 34, 50), 8)
-    TextY(dl, b.x + 199, b.y + 66, 25, C(138, 192, 255), 'Loadout', F.ctrl)
-    Soldier(dl, b.x + 264, b.y + 388)
+    TextY(dl, b.x + 199, b.y + 66, 25, C(138, 192, 255), L('Loadout'), F.ctrl)
+    Figure(dl, b.x + 264, b.y + 452, 0.6, 1, true)
     for r = 0, 4 do
         for c = 0, 2 do
             WeaponCell(dl, '##inv' .. r .. c, b.x + 390 + c * 116, b.y + 88 + r * 96, 108, 91,
                 INV_COLS[c + 1][r + 1], ACCENTS[(r + c) % 6 + 1])
         end
     end
-    Text(dl, b.x + 424, b.y + 67, C(205, 209, 219), 'Pistols', F.ctrl)
-    Text(dl, b.x + 536, b.y + 67, C(205, 209, 219), 'Mid-Tier', F.ctrl)
-    Text(dl, b.x + 655, b.y + 67, C(205, 209, 219), 'Rifles', F.ctrl)
+    Text(dl, b.x + 424, b.y + 67, C(205, 209, 219), L('Pistols'), F.ctrl)
+    Text(dl, b.x + 536, b.y + 67, C(205, 209, 219), L('Mid-Tier'), F.ctrl)
+    Text(dl, b.x + 655, b.y + 67, C(205, 209, 219), L('Rifles'), F.ctrl)
     for r = 0, 1 do
         for c = 0, 2 do
             WeaponCell(dl, '##invs' .. r .. c, b.x + 171 + c * 65, b.y + 470 + r * 51, 55, 47,
@@ -766,8 +1006,8 @@ local function Sidebar(dl, bx, by)
     Text(dl, bx + 53, by + 14, C(228, 230, 236), 'rage-mod', F.title)
     Text(dl, bx + 53, by + 33, C(91, 96, 108), 'San Andreas Multiplayer', F.t8)
     dl:AddLine(V(bx + 10, by + 56), V(bx + 147, by + 56), C(28, 31, 41))
-    Text(dl, bx + 16, by + 67, C(91, 96, 108), 'AIMBOT', F.cap)
-    Text(dl, bx + 16, by + 169, C(91, 96, 108), 'COMMON', F.cap)
+    Text(dl, bx + 16, by + 67, C(91, 96, 108), L('AIMBOT'), F.cap)
+    Text(dl, bx + 16, by + 169, C(91, 96, 108), L('COMMON'), F.cap)
 
     local function nav(key, icon, label, y, target, selected, indent)
         indent = indent or 0
@@ -777,7 +1017,9 @@ local function Sidebar(dl, bx, by)
         if clicked then ChangePage(target) end
         if r > 0.001 then dl:AddRectFilled(V(px, py), V(px + 140 - indent, py + 30), Mix({ 18, 21, 30, 0 }, { 39, 43, 54 }, r), 6) end
         Icon(dl, icon, px + 10, py, 30, Mix({ 137, 142, 153 }, { 82, 141, 255 }, r))
-        TextY(dl, px + 31, py, 30, Mix({ 145, 149, 159 }, { 226, 228, 235 }, r), label, F.body)
+        dl:PushClipRect(V(px, py), V(px + 140 - indent - 4, py + 30), true)
+        TextY(dl, px + 31, py, 30, Mix({ 145, 149, 159 }, { 226, 228, 235 }, r), L(label), F.body)
+        dl:PopClipRect()
     end
 
     local visuals = page == 'players' or page == 'world'
@@ -807,15 +1049,15 @@ local function Sidebar(dl, bx, by)
     Avatar(dl, ax + 21, ay + 19, 14, name)
     dl:PushClipRect(V(ax + 43, ay), V(ax + 126, ay + 38), true)
     Text(dl, ax + 43, ay + 4, C(225, 227, 233), name, F.ctrl)
-    Text(dl, ax + 43, ay + 20, C(111, 116, 128), id >= 0 and ('ID: ' .. id) or 'offline', F.small)
+    Text(dl, ax + 43, ay + 20, C(111, 116, 128), id >= 0 and ('ID: ' .. id) or L('offline'), F.small)
     dl:PopClipRect()
     Chevron(dl, ax + 132, ay + 15, C(181, 185, 195))
 end
 
 local PROFILE_ITEMS = {
     'Save Config', 'Load Config', 'Reset Config',
-    function() return 'Open Key: ' .. (keyNames[O.menu_key + 1] or '?') end,
-    function() return 'Notifications: ' .. (O.notify and 'On' or 'Off') end,
+    function() return L('Open Key: ') .. (keyNames[O.menu_key + 1] or '?') end,
+    function() return L('Notifications: ') .. L(O.notify and 'On' or 'Off') end,
 }
 local function profileSet(i)
     if i == 1 then actSave() elseif i == 2 then actLoad() elseif i == 3 then actReset()
@@ -827,8 +1069,6 @@ end
 local function Toolbar(dl, bx, by)
     FillTopRightRounded(dl, bx + 158, by, bx + 748, by + 56, 14, C(11, 13, 20, 225))
     dl:AddLine(V(bx + 158, by + 56), V(bx + 748, by + 56), C(27, 30, 39))
-
-    -- профиль конфига (как «Nonprime 7.2»)
     local px, py = bx + 169, by + 14
     if Hit('##tb_profile', px, py, 166, 30) then
         OpenPopup('##tb_profile', PROFILE_ITEMS, function() return false end, profileSet, px, py, 166, 30)
@@ -837,31 +1077,11 @@ local function Toolbar(dl, bx, by)
     dl:AddRectFilled(V(px, py), V(px + 166, py + 30), Mix({ 17, 19, 27 }, { 22, 25, 35 }, r), 6)
     dl:AddRect(V(px, py), V(px + 166, py + 30), Mix({ 28, 31, 41 }, { 45, 52, 70 }, r), 6)
     Icon(dl, 'save', px + 12, py, 30, C(194, 197, 206))
-    TextY(dl, px + 48, py, 30, C(184, 187, 197), 'Default', F.ctrl)
+    TextY(dl, px + 48, py, 30, C(184, 187, 197), L('Profile'), F.ctrl)
     Chevron(dl, px + 148, py + 11, C(130, 135, 146))
-
-    -- «Global» / выбор оружия — с настоящей иконкой
     if page == 'rage' or page == 'legit' then
-        local wid = WEAPON_SLOTS[O.weapon + 1]
-        local label = WEAPON_SLOT_NAMES[O.weapon + 1] or 'Global'
-        local hasIcon = wid and WICON[wid] ~= nil
-        local tx = hasIcon and 40 or 13
-        local gw = math.max(85, tx + TextSize(label, F.ctrl).x + 30)
-        local gx, gy = bx + 348, by + 14
-        if Hit('##tb_weapon', gx, gy, gw, 30) then
-            OpenPopup('##tb_weapon', WEAPON_SLOT_NAMES,
-                function(i) return O.weapon == i - 1 end,
-                function(i) O.weapon = i - 1; if WEAPON_SLOTS[i] then O.inv_sel = WEAPON_SLOTS[i] end; return true end,
-                gx, gy, 190, 30, WEAPON_SLOTS)
-        end
-        local wr = Motion('tb_weapon#hv', (imgui.IsItemHovered() or (popup.open and popup.owner == '##tb_weapon')) and 1 or 0)
-        dl:AddRectFilled(V(gx, gy), V(gx + gw, gy + 30), Mix({ 17, 19, 27 }, { 22, 25, 35 }, wr), 6)
-        dl:AddRect(V(gx, gy), V(gx + gw, gy + 30), Mix({ 28, 31, 41 }, { 45, 52, 70 }, wr), 6)
-        if hasIcon then WeaponIcon(dl, wid, gx + 22, gy + 15, 26) end
-        TextY(dl, gx + tx, gy, 30, C(184, 187, 197), label, F.ctrl)
-        Chevron(dl, gx + gw - 17, gy + 11, C(130, 135, 146))
+        WeaponPicker(dl, '##tb_weapon', bx + 348, by + 14, 85, 30)
     end
-
     dl:AddCircle(V(bx + 719, by + 28), 5, C(180, 184, 194), 20, 2)
     dl:AddLine(V(bx + 723, by + 32), V(bx + 727, by + 36), C(180, 184, 194), 2)
 end
@@ -876,17 +1096,16 @@ local function overlayFlags()
     end
     return OVERLAY_FLAGS
 end
-
 local function beginOverlay(name, x, y, w, h, frame)
     if imgui.GetFrameCount() <= frame + 1 then imgui.SetNextWindowFocus() end
-    imgui.SetNextWindowPos(V(x, y), imgui.Cond.Always)
-    imgui.SetNextWindowSize(V(w, h), imgui.Cond.Always)
+    imgui.SetNextWindowPos(TV(x, y), imgui.Cond.Always)
+    imgui.SetNextWindowSize(imgui.ImVec2(w * SC, h * SC), imgui.Cond.Always)
     imgui.Begin(name, nil, overlayFlags())
-    return imgui.GetWindowDrawList()
+    local raw = imgui.GetWindowDrawList()
+    return wrapDL(raw), raw
 end
-
 local function popupHovered()
-    return popup.open and inRect(imgui.GetMousePos(), popup.rx, popup.ry, popup.rw, popup.rh)
+    return popup.open and inRect(Mouse(), popup.rx, popup.ry, popup.rw, popup.rh)
 end
 
 local function PopupLayer(reveal)
@@ -894,24 +1113,30 @@ local function PopupLayer(reveal)
     if open < 0.002 or not popup.items then return end
     local items, icons = popup.items, popup.icons
     local count = #items
-    local w, h = popup.w, count * 32 + 8
-    local sw, sh = getScreenResolution()
-    local px = clamp(popup.x, 10, sw - w - 10)
-    local py = clamp(popup.y + (popup.ah - h) * 0.5, 10, sh - h - 10)
+    -- ширина под самый длинный пункт (для русского языка)
+    local w = popup.w
+    for i, it in ipairs(items) do
+        local label = L(type(it) == 'function' and it() or it)
+        local off = (icons and icons[i] and WICON[icons[i]]) and 70 or 35
+        w = math.max(w, off + TextSize(label, F.ctrl).x + 16)
+    end
+    local h = count * 32 + 8
+    local lx0, ly0, lx1, ly1 = screenL()
+    local px = clamp(popup.x, lx0 + 10, lx1 - w - 10)
+    local py = clamp(popup.y + (popup.ah - h) * 0.5, ly0 + 10, ly1 - h - 10)
     popup.rx, popup.ry, popup.rw, popup.rh = px, py, w, h
 
-    local dl = beginOverlay('##nl_popup', px - 8, py - 6, w + 16, h + 18, popup.frame)
-    local first = vtxFirst(dl)
+    local dl, raw = beginOverlay('##nl_popup', px - 8, py - 6, w + 16, h + 18, popup.frame)
+    local first = vtxFirst(raw)
     local e = 1 - (1 - open) ^ 3
     gA = reveal * e
     dl:AddRectFilled(V(px - 5, py - 2), V(px + w + 5, py + h + 8), C(0, 0, 0, 55), 18)
     dl:AddRectFilled(V(px, py), V(px + w, py + h), C(20, 20, 29, 235), 16)
     dl:AddRect(V(px, py), V(px + w, py + h), C(57, 61, 76, 205), 16)
     dl:AddLine(V(px + 16, py + 1), V(px + w - 16, py + 1), C(255, 255, 255, 22))
-
     local accepts = imgui.GetFrameCount() > popup.frame and popup.open
     for i, it in ipairs(items) do
-        local label = type(it) == 'function' and it() or it
+        local label = L(type(it) == 'function' and it() or it)
         local rx, ry = px + 4, py + 4 + (i - 1) * 32
         local clicked = Hit('##pp' .. i, rx, ry, w - 8, 32)
         local hv = Motion('pp#' .. tostring(popup.owner) .. i, imgui.IsItemHovered() and 1 or 0, 22)
@@ -926,12 +1151,8 @@ local function PopupLayer(reveal)
         TextY(dl, tx, ry, 32, selected and C(224, 229, 243) or C(182, 185, 196), label, F.ctrl)
         if accepts and clicked and popup.set(i) then popup.open = false end
     end
-
-    local pv = V(px + w * 0.5, py + h * 0.5)
-    vtxScale(dl, first, pv.x, pv.y, 0.96 + 0.04 * e, 4 * (1 - e), 0)
-
-    if popup.open and imgui.GetFrameCount() > popup.frame and imgui.IsMouseClicked(0)
-        and not imgui.IsWindowHovered() then
+    vtxScale(raw, first, px + w * 0.5, py + h * 0.5, 0.96 + 0.04 * e, 4 * (1 - e), 0)
+    if popup.open and imgui.GetFrameCount() > popup.frame and imgui.IsMouseClicked(0) and not imgui.IsWindowHovered() then
         popup.open = false
     end
     imgui.End()
@@ -941,17 +1162,17 @@ local function SubPopover(reveal)
     local open = Motion('sub_open', sub.open and 1 or 0, 20, 0)
     if open < 0.002 or not sub.def then return end
     local rows = sub.def.rows
-    local w, h = 270, #rows * 37
-    local sw, sh = getScreenResolution()
+    local w, h = 290, #rows * 37
+    local lx0, ly0, lx1, ly1 = screenL()
     local px = sub.ax + sub.aw + 10
-    if px + w > sw - 10 then px = sub.ax - w - 10 end
-    local py = clamp(sub.ay - 4, 10, sh - h - 10)
-    local dl = beginOverlay('##nl_sub', px - 8, py - 26, w + 16, h + 40, sub.frame)
-    local first = vtxFirst(dl)
+    if px + w > lx1 - 10 then px = sub.ax - w - 10 end
+    local py = clamp(sub.ay - 4, ly0 + 26, ly1 - h - 10)
+    local dl, raw = beginOverlay('##nl_sub', px - 8, py - 26, w + 16, h + 40, sub.frame)
+    local first = vtxFirst(raw)
     local e = 1 - (1 - open) ^ 3
     gA = reveal * e
     dl:AddRectFilled(V(px - 5, py - 2), V(px + w + 5, py + h + 8), C(0, 0, 0, 55), 18)
-    Text(dl, px + 12, py - 18, C(89, 94, 106), sub.def.title, F.cap)
+    Text(dl, px + 12, py - 18, C(89, 94, 106), L(sub.def.title), F.cap)
     dl:AddRectFilled(V(px, py), V(px + w, py + h), C(20, 20, 29, 240), 14)
     dl:AddRect(V(px, py), V(px + w, py + h), C(57, 61, 76, 205), 14)
     for i, row in ipairs(rows) do
@@ -959,11 +1180,10 @@ local function SubPopover(reveal)
         if i > 1 then dl:AddLine(V(px + 12, ry), V(px + w - 12, ry), C(28, 31, 40)) end
         RowControl(dl, px, ry, w, row, '##sub' .. i)
     end
-    vtxScale(dl, first, px, py + h * 0.5, 0.96 + 0.04 * e, -6 * (1 - e), 0)
-
+    vtxScale(raw, first, px, py + h * 0.5, 0.96 + 0.04 * e, -6 * (1 - e), 0)
     if sub.open and imgui.GetFrameCount() > sub.frame and imgui.IsMouseClicked(0)
         and not imgui.IsWindowHovered() and not popupHovered()
-        and not inRect(imgui.GetMousePos(), sub.ax, sub.ay, sub.aw, sub.ah) then
+        and not inRect(Mouse(), sub.ax, sub.ay, sub.aw, sub.ah) then
         sub.open, popup.open = false, false
     end
     imgui.End()
@@ -972,7 +1192,7 @@ end
 local ACC_ROWS = {
     { 'Language', 'acc_lang', { 'English', 'Русский' } },
     { 'Menu Scale', 'acc_menu_scale', { '100%', '125%', '150%' } },
-    { 'ESP Scale', 'acc_esp_scale', { '100%', '125%', '150%' } },
+    { 'ESP Scale', 'acc_esp_scale', { '100%', '110%', '120%' } },
 }
 
 local function AccountPopover(bx, by, reveal)
@@ -982,25 +1202,22 @@ local function AccountPopover(bx, by, reveal)
     local px, py = bx + 151, by + 380
     local dl = beginOverlay('##nl_account', px - 6, py - 4, w + 12, h + 14, account.frame)
     gA = reveal * open
-
     dl:AddRectFilled(V(px - 4, py - 2), V(px + w + 4, py + h + 7), C(0, 0, 0, 65), 18)
     dl:AddRectFilled(V(px, py), V(px + w, py + h), C(24, 25, 34, 245), 16)
     dl:AddRect(V(px, py), V(px + w, py + h), C(48, 51, 64), 16)
-
     local name, id = localIdentity()
     Avatar(dl, px + 35, py + 34, 18, name)
     dl:PushClipRect(V(px + 62, py), V(px + w - 10, py + 60), true)
     Text(dl, px + 64, py + 15, C(229, 231, 237), name, F.body)
-    Text(dl, px + 64, py + 34, C(115, 164, 255), id >= 0 and ('ID: ' .. id .. '  ·  v' .. thisScript().version) or 'offline', F.ctrl)
+    Text(dl, px + 64, py + 34, C(115, 164, 255), id >= 0 and ('ID: ' .. id .. '  ·  v' .. thisScript().version) or L('offline'), F.ctrl)
     dl:PopClipRect()
-
     local accepts = imgui.GetFrameCount() > account.frame and account.open
     for i, r in ipairs(ACC_ROWS) do
         local ry = py + 66 + (i - 1) * 28
         local clicked = Hit('##acc' .. i, px + 6, ry, w - 12, 28)
         local hv = Motion('acc#' .. i, (imgui.IsItemHovered() or (popup.open and popup.owner == '##acc' .. i)) and 1 or 0, 22)
         if hv > 0.001 then dl:AddRectFilled(V(px + 6, ry), V(px + w - 6, ry + 28), C(75, 126, 255, 22 * hv), 8) end
-        TextY(dl, px + 18, ry, 28, C(185, 188, 198), r[1], F.ctrl)
+        TextY(dl, px + 18, ry, 28, C(185, 188, 198), L(r[1]), F.ctrl)
         local val = r[3][O[r[2]] + 1] or ''
         local vw = TextSize(val, F.small).x
         TextY(dl, px + 186 - vw, ry, 28, C(111, 116, 128), val, F.small)
@@ -1011,12 +1228,11 @@ local function AccountPopover(bx, by, reveal)
                 function(k) O[key] = k - 1; return true end, px + w - 140, ry + 2, 134, 23)
         end
     end
-    TextY(dl, px + 18, py + 66 + 3 * 28, 28, C(185, 188, 198), 'Synchronization', F.ctrl)
+    TextY(dl, px + 18, py + 66 + 3 * 28, 28, C(185, 188, 198), L('Synchronization'), F.ctrl)
     Toggle(dl, '##acc_sync', px + 169, py + 150, 'acc_sync')
-
     if account.open and imgui.GetFrameCount() > account.frame and imgui.IsMouseClicked(0)
         and not imgui.IsWindowHovered() and not popupHovered()
-        and not inRect(imgui.GetMousePos(), bx + 7, by + 531, 140, 38) then
+        and not inRect(Mouse(), bx + 7, by + 531, 140, 38) then
         account.open, popup.open = false, false
     end
     imgui.End()
@@ -1024,7 +1240,6 @@ end
 
 -- ============================================================ РЕНДЕР МЕНЮ
 local SHELL_W, SHELL_H = 748, 576
-
 local function closePopups() popup.open, sub.open, account.open = false, false, false end
 local function toggleMenu()
     menu[0] = not menu[0]
@@ -1033,38 +1248,38 @@ local function toggleMenu()
 end
 
 imgui.OnFrame(function() return menu[0] end, function()
+    applyScale()
     local sw, sh = getScreenResolution()
-    imgui.SetNextWindowPos(V(sw / 2, sh / 2), imgui.Cond.FirstUseEver, V(0.5, 0.5))
-    imgui.SetNextWindowSize(V(SHELL_W, SHELL_H), imgui.Cond.Always)
-    imgui.PushStyleVarVec2(imgui.StyleVar.WindowPadding, V(0, 0))
+    imgui.SetNextWindowPos(imgui.ImVec2(sw / 2, sh / 2), imgui.Cond.FirstUseEver, imgui.ImVec2(0.5, 0.5))
+    imgui.SetNextWindowSize(imgui.ImVec2(SHELL_W * SC, SHELL_H * SC), imgui.Cond.Always)
+    imgui.PushStyleVarVec2(imgui.StyleVar.WindowPadding, imgui.ImVec2(0, 0))
     imgui.PushStyleVarFloat(imgui.StyleVar.WindowBorderSize, 0)
     imgui.PushStyleColor(imgui.Col.WindowBg, imgui.ImVec4(0, 0, 0, 0))
 
     local wf = imgui.WindowFlags
     imgui.Begin('##neverlose', menu, bit.bor(wf.NoTitleBar, wf.NoResize, wf.NoCollapse, wf.NoScrollbar,
         wf.NoScrollWithMouse, wf.NoSavedSettings, wf.NoBringToFrontOnFocus))
-
-    local dl = imgui.GetWindowDrawList()
+    local raw = imgui.GetWindowDrawList()
+    local dl = wrapDL(raw)
     local wp = imgui.GetWindowPos()
+    OX, OY = wp.x, wp.y
     local bx, by = wp.x, wp.y
     local reveal = Motion('reveal', 1, 9, 0)
     local re = 1 - (1 - reveal) ^ 4
-    local shellFirst = vtxFirst(dl)
+    local shellFirst = vtxFirst(raw)
 
     gA = re
     dl:AddRectFilled(V(bx, by), V(bx + SHELL_W, by + SHELL_H), C(13, 15, 22, 222), 14)
     Sidebar(dl, bx, by)
     Toolbar(dl, bx, by)
-
     pageMix = pageMix + (1 - pageMix) * (1 - math.exp(-15 * imgui.GetIO().DeltaTime))
     local pe = 1 - (1 - pageMix) ^ 3
     gA = re * pe
     local fn = PAGES[page] or PAGES.rage
     fn(dl, { x = bx + 9 * (1 - pe), y = by })
     gA = re
-
     if re < 0.999 then
-        vtxScale(dl, shellFirst, bx + SHELL_W * 0.5, by + SHELL_H * 0.5, 0.92 + 0.08 * re, 0, (1 - re) * 16)
+        vtxScale(raw, shellFirst, bx + SHELL_W * 0.5, by + SHELL_H * 0.5, 0.92 + 0.08 * re, 0, (1 - re) * 16)
     end
     imgui.End()
 
@@ -1076,32 +1291,62 @@ imgui.OnFrame(function() return menu[0] end, function()
     gA = 1
 end)
 
--- ============================================================ ANTI-AIM (рабочий)
-local aaAngle, aaFlip = 0, false
+-- ============================================================ ANTI-AIM (крутилка)
+local aaFlip, aaSign = false, 1
 
-local function aaHeading(base)
+local function aaActive()
+    if not O.aa_enable then return false end
+    if not doesCharExist(PLAYER_PED) or not isCharOnFoot(PLAYER_PED) then return false end
+    if O.aa_noaim and isKeyDown(0x02) then return false end
+    return true
+end
+
+local function aaSpinAngle() return (os.clock() * O.aa_speed * 24) % 360 end
+
+local function aaYaw(base)
     local m = O.aa_mode
-    if m == 0 then
-        aaAngle = (aaAngle + O.aa_speed) % 360
-        return aaAngle
+    if m == 0 then return aaSpinAngle()
     elseif m == 1 then
         aaFlip = not aaFlip
-        local j = aaFlip and O.aa_jitter or -O.aa_jitter
-        return (base + 180 + j) % 360
-    elseif m == 2 then
-        return math.random(0, 359)
-    end
+        return (base + 180 + (aaFlip and O.aa_jitter or -O.aa_jitter)) % 360
+    elseif m == 2 then return math.random(0, 359) end
     return (base + 180) % 360
 end
 
+local function wrapPi(a) return (a + PI) % (2 * PI) - PI end
+local localSpinning, lastForce = false, 0
+
 function sampev.onSendPlayerSync(data)
-    if not O.aa_enable then return end
-    if O.aa_noaim and isKeyDown(0x02) then return end
-    local h = math.rad(aaHeading(getCharHeading(PLAYER_PED)))
-    data.quaternion[0] = math.cos(h / 2)
-    data.quaternion[1] = 0
-    data.quaternion[2] = 0
-    data.quaternion[3] = math.sin(h / 2)
+    if not aaActive() then return end
+    local base = getCharHeading(PLAYER_PED)
+    local q = data.quaternion
+    -- определяем знак (конвенцию) кватерниона SA-MP по исходному пакету
+    local hb = math.rad(base)
+    if math.abs(math.sin(hb)) > 0.25 then
+        local a0 = 2 * math.atan2(q[3], q[0])
+        aaSign = (math.abs(wrapPi(a0 - hb)) <= math.abs(wrapPi(a0 + hb))) and 1 or -1
+    end
+    local yaw = localSpinning and base or aaYaw(base)
+    local h = math.rad(yaw)
+    q[0] = math.cos(h / 2)
+    q[1] = 0
+    q[2] = 0
+    q[3] = aaSign * math.sin(h / 2)
+end
+
+local function aaTick()
+    localSpinning = false
+    if not aaActive() then return end
+    -- показываем крутилку и у себя: крутим персонажа, пока он стоит
+    if O.aa_local and O.aa_mode == 0 and getCharSpeed(PLAYER_PED) < 0.5 then
+        setCharHeading(PLAYER_PED, aaSpinAngle())
+        localSpinning = true
+    end
+    -- частая отправка синхронизации, чтобы вращение у других было плавным
+    if O.aa_force and os.clock() - lastForce > 0.04 then
+        lastForce = os.clock()
+        pcall(sampForceOnfootSync)
+    end
 end
 
 -- ============================================================ INIT / MAIN
@@ -1110,14 +1355,12 @@ imgui.OnInitialize(function()
     io.IniFilename = nil
     local st = imgui.GetStyle()
     st.WindowRounding, st.WindowBorderSize = 14, 0
-    st.WindowPadding, st.ItemSpacing = V(0, 0), V(0, 0)
+    st.WindowPadding, st.ItemSpacing = imgui.ImVec2(0, 0), imgui.ImVec2(0, 0)
 
     local glyph = io.Fonts:GetGlyphRangesCyrillic()
     local res = getWorkingDirectory() .. '\\resource\\rage-mod\\'
     local sys = getFolderPath(0x14) .. '\\'
-    local function pick(list)
-        for _, p in ipairs(list) do if doesFileExist(p) then return p end end
-    end
+    local function pick(list) for _, p in ipairs(list) do if doesFileExist(p) then return p end end end
     local medium = pick({ res .. 'SSTMedium.TTF', sys .. 'seguisb.ttf', sys .. 'segoeui.ttf', sys .. 'arial.ttf' })
     local bold   = pick({ res .. 'SSTBold.TTF', sys .. 'segoeuib.ttf', sys .. 'arialbd.ttf' }) or medium
     local fa     = pick({ res .. 'fa-solid-900.ttf', getWorkingDirectory() .. '\\resource\\fonts\\fa-solid-900.ttf' })
@@ -1125,22 +1368,25 @@ imgui.OnInitialize(function()
     local cfg = imgui.ImFontConfig()
     cfg.OversampleH = 3
     cfg.PixelSnapH = true
-
     io.Fonts:Clear()
-    F.body  = io.Fonts:AddFontFromFileTTF(medium, 15.0, cfg, glyph)
-    F.ctrl  = io.Fonts:AddFontFromFileTTF(medium, 14.0, cfg, glyph)
-    F.small = io.Fonts:AddFontFromFileTTF(medium, 12.0, cfg, glyph)
-    F.cap   = io.Fonts:AddFontFromFileTTF(medium, 10.0, cfg, glyph)
-    F.t9    = io.Fonts:AddFontFromFileTTF(medium, 9.0, cfg, glyph)
-    F.t8    = io.Fonts:AddFontFromFileTTF(medium, 8.0, cfg, glyph)
-    F.title = io.Fonts:AddFontFromFileTTF(bold, 16.0, cfg, glyph)
-    if fa then F.icon = io.Fonts:AddFontFromFileTTF(fa, 13.0, cfg, FA_RANGES) end
+    for i, s in ipairs(SCALES) do
+        local f = {}
+        f.body  = io.Fonts:AddFontFromFileTTF(medium, 15.0 * s, cfg, glyph)
+        f.ctrl  = io.Fonts:AddFontFromFileTTF(medium, 14.0 * s, cfg, glyph)
+        f.small = io.Fonts:AddFontFromFileTTF(medium, 12.0 * s, cfg, glyph)
+        f.cap   = io.Fonts:AddFontFromFileTTF(medium, 10.0 * s, cfg, glyph)
+        f.t9    = io.Fonts:AddFontFromFileTTF(medium, 9.0 * s, cfg, glyph)
+        f.t8    = io.Fonts:AddFontFromFileTTF(medium, 8.0 * s, cfg, glyph)
+        f.title = io.Fonts:AddFontFromFileTTF(bold, 16.0 * s, cfg, glyph)
+        if fa then f.icon = io.Fonts:AddFontFromFileTTF(fa, 13.0 * s, cfg, FA_RANGES) end
+        FS[i] = f
+    end
+    for k, v in pairs(FS[1]) do F[k] = v end
 end)
 
 function main()
     if not isSampLoaded() or not isSampfuncsLoaded() then return end
     while not isSampAvailable() do wait(100) end
-
     loadConfig()
     sampRegisterChatCommand('ragemd', toggleMenu)
     refreshWeaponIcons(true)
@@ -1150,19 +1396,15 @@ function main()
     while true do
         wait(0)
         local free = not sampIsChatInputActive() and not sampIsDialogActive() and not isSampfuncsConsoleActive()
-
         local key = keyCodes[O.menu_key + 1]
         if key and key ~= 0 and isKeyJustPressed(key) and free then toggleMenu() end
-
         if menu[0] and isKeyJustPressed(0x1B) then closePopups() end
-
         local aak = keyCodes[O.aa_key + 1]
         if aak and aak ~= 0 and isKeyJustPressed(aak) and free then
             O.aa_enable = not O.aa_enable
             if O.notify then chat('Anti-Aim: ' .. (O.aa_enable and '{3DE07A}ON' or '{E03D3D}OFF')) end
         end
-
-        -- иконки оружия: следим, чтобы модели не выгрузились стримером
+        aaTick()
         if os.clock() - lastIconCheck > 1.5 then
             lastIconCheck = os.clock()
             refreshWeaponIcons(false)
