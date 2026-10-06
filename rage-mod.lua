@@ -20,7 +20,7 @@
 
 script_name('rage-mod')
 script_author('rage-mod')
-script_version('4.8.15')
+script_version('4.8.16')
 
 local imgui    = require 'mimgui'
 local encoding = require 'encoding'
@@ -262,7 +262,7 @@ local RU = {
     ['On Release'] = 'При отпускании', ['Shot or Release'] = 'Выстрел или отпускание', ['Method'] = 'Способ',
     ['Run Back'] = 'Бегом', ['Teleport'] = 'Телепорт', ['Return Speed'] = 'Скорость возврата',
     ['Show Position'] = 'Показывать точку', ['Through Walls'] = 'Сквозь стены',
-    ['Engine Shot (real)'] = 'Выстрел движком (настоящий)', ['Scripted Jump'] = 'Свой прыжок', ['Packet (fake)'] = 'Пакетом (фейк)',
+    ['Standing Spoof (real)'] = 'Подмена «стоит на земле» (настоящий)', ['Scripted Jump'] = 'Свой прыжок', ['Packet (fake)'] = 'Пакетом (фейк)',
     ['Rapid Fire'] = 'Рапид фаер в прыжке', ['Auto +C'] = 'Авто +C', ['AUTO +C'] = 'АВТО +C',
     ['C Delay'] = 'Задержка C', ['Fast +C (pro)'] = 'Фаст +C (как у профи)', ['Classic'] = 'Классический',
     ['Re-press Fire'] = 'Перенажимать огонь', ['Stand Up'] = 'Вставать обратно', ['Stand Delay'] = 'Задержка подъёма',
@@ -1077,7 +1077,7 @@ VIS.SUB_QP = { title = 'QUICK PEEK ASSIST', rows = CARD('qp', {
 -- Jump Attack: в прыжке игра стрелять не даёт — выстрел (bullet sync + урон) отправляет скрипт
 VIS.SUB_JA = { title = 'JUMP ATTACK', rows = CARD('ja', {
     T_('Enabled', false, 'ja_on'),
-    SEL('Method', { 'Engine Shot (real)', 'Scripted Jump', 'Packet (fake)' }, 0, 'ja_method2'),
+    SEL('Method', { 'Standing Spoof (real)', 'Scripted Jump', 'Packet (fake)' }, 0, 'ja_method3'),
     SL('Jump Power', 3, 9, 5.5, '%.1f', true, 'ja_power'),
     SEL('Fire From', { 'On Click', 'With Trigger Bot', 'Click or Trigger' }, 2, 'ja_src'),
     T_('Need Target', false, 'ja_need2'),
@@ -2852,7 +2852,7 @@ end
 RG.JA_RATE = { [22] = 0.25, [23] = 0.4, [24] = 0.8, [25] = 1.0, [26] = 0.3, [27] = 0.35, [28] = 0.07, [29] = 0.09,
                [30] = 0.11, [31] = 0.11, [32] = 0.07, [33] = 1.0, [34] = 1.2, [38] = 0.03 }
 RG.ja = { lastT = 0, sending = false, warned = false }
-function RG.jaWindow() return O.ja_on and (O.ja_method2 or 0) ~= 1 and os.clock() - RG.ja.lastT < 0.25 end
+function RG.jaWindow() return O.ja_on and (O.ja_method3 or 0) == 2 and os.clock() - RG.ja.lastT < 0.25 end
 -- цель выстрела Jump Attack (для подмены пули в onBullet)
 function RG.jaShotTarget()
     local ja = RG.ja
@@ -2989,8 +2989,9 @@ end
 function RG.jaTick(free)
     local ja = RG.ja
     if not O.ja_on or not free or not spawnedAt or os.clock() - spawnedAt < 5 then return end
-    local method = O.ja_method2 or 0
+    local method = O.ja_method3 or 0
     if method == 1 then return RG.jaJumpTick(free, true) end
+    if method == 0 then return RG.jaSpoofTick(free) end
     -- движок отказывается стрелять из задачи игрового прыжка (поэтому без бхопа/аир-стрейфа не работало):
     -- прыжок с оружием всегда делает скрипт, без задачи прыжка — и выстрел движком проходит стабильно
     if method == 0 and O.ja_ownjump ~= false then RG.jaJumpTick(free, false) end
@@ -3041,7 +3042,7 @@ function RG.jaTick(free)
     -- пытается возобновить уже работающую корутину -> «cannot resume non-suspended coroutine» и скрипт умирает
     ja.busy = true
     local ox, oy, oz, tx, ty, tz = d.origin.x, d.origin.y, d.origin.z, d.target.x, d.target.y, d.target.z
-    RG.jaRun(function()
+    local job = (function()
         pcall(sampForceOnfootSync)
         pcall(sampForceAimSync)
         if method == 0 then
@@ -3079,6 +3080,36 @@ function RG.jaTick(free)
             end
         end
     end)
+    job()
+end
+
+-- Подмена «стоит на земле»: GTA не даёт целиться/стрелять, пока у педа снят флаг bIsStanding
+-- (CPed + 0x46C, бит 0). В воздухе, когда хочешь стрелять, ставим его каждый кадр — игра сама
+-- целится и стреляет: настоящая пуля, анимация, звук, синк, урон, сайлент/триггер/+C/рапид-моды работают как на земле.
+-- Никаких вызовов функций игры из Lua — значит, никаких «cannot resume non-suspended coroutine».
+function RG.jaSpoofTick(free)
+    local ja = RG.ja
+    if O.ja_ownjump ~= false then RG.jaJumpTick(free, false) end
+    if not free or not isCharOnFoot(PLAYER_PED) or isCharInWater(PLAYER_PED) then return end
+    if not isCharInAir(PLAYER_PED) then return end
+    local w = getCurrentCharWeapon(PLAYER_PED)
+    if not RG.DMG[w] then return end
+    local now = os.clock()
+    local src = O.ja_src or 2
+    local trig = src ~= 0 and O.tb_on and now - RG.tb.fireT < 0.05
+    local want = isKeyDown(0x02) or (src ~= 1 and isKeyDown(0x01)) or trig
+    if not want then return end
+    local wt, ped = RG.jaWeapon()
+    if not ped then return end
+    local f = ffi.cast('uint8_t*', ped + 0x46C)
+    f[0] = bit.bor(f[0], 1)                                     -- bIsStanding = true
+    if trig then setGameKeyState(6, 255); setGameKeyState(17, 255) end
+    -- рапид в прыжке: оружие «готово» раньше, чем закончится анимация выстрела
+    if O.ja_rapid and wt and wt[1] == 1 and wt[2] > 0 then
+        local iv = (RG.JA_RATE[w] or 0.3) / ((O.ja_rate or 100) / 100) * 0.5
+        if now - (RG.qp.shotT or 0) >= iv then wt[1] = 0; wt[4] = 0 end
+    end
+    if now - (ja.spoofLog or 0) > 1 then ja.spoofLog = now; TR.E('ja.spoof w' .. w) end
 end
 
 -- очередь задач Jump Attack: выполняются в отдельном lua_thread (после wait — когда main-корутина на паузе)
