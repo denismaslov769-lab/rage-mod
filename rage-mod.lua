@@ -20,7 +20,7 @@
 
 script_name('rage-mod')
 script_author('rage-mod')
-script_version('4.2.0')
+script_version('4.3.0')
 
 local imgui    = require 'mimgui'
 local encoding = require 'encoding'
@@ -267,6 +267,65 @@ local RU = {
     ['Mid-Tier'] = 'Средние', ['Rifles'] = 'Винтовки', ['Box'] = 'Бокс', ['Name'] = 'Имя', ['Health'] = 'HP',
     ['Dist'] = 'Дист.', ['Distance'] = 'Дистанция', ['offline'] = 'оффлайн', ['Profile'] = 'Профиль',
 }
+do
+    local add = {
+        ['SKY & FOG'] = 'НЕБО И ТУМАН',
+        ['SUN & CLOUDS'] = 'СОЛНЦЕ И ОБЛАКА',
+        ['LIGHTING'] = 'ОСВЕЩЕНИЕ',
+        ['RAINBOW'] = 'РАДУГА',
+        ['ESP TEXT'] = 'ТЕКСТ ESP',
+        ['Override Fog'] = 'Свой туман',
+        ['Fog Start'] = 'Начало тумана',
+        ['Draw Distance'] = 'Дальность прорисовки',
+        ['Custom Sky'] = 'Своё небо',
+        ['Sky Top'] = 'Верх неба',
+        ['Sky Bottom / Fog'] = 'Низ неба / туман',
+        ['Custom Sun'] = 'Своё солнце',
+        ['Sun Core'] = 'Ядро солнца',
+        ['Sun Halo'] = 'Ореол солнца',
+        ['Sun Size'] = 'Размер солнца',
+        ['Custom Clouds'] = 'Свои облака',
+        ['Low Clouds'] = 'Низкие облака',
+        ['Fluffy Clouds'] = 'Пушистые облака',
+        ['Clouds Alpha'] = 'Прозрачность облаков',
+        ['Custom Ambient'] = 'Свой эмбиент',
+        ['Ambient Color'] = 'Цвет эмбиента',
+        ['Ambient Power'] = 'Сила эмбиента',
+        ['Color Filter'] = 'Цветофильтр',
+        ['Filter Color'] = 'Цвет фильтра',
+        ['Custom Water'] = 'Своя вода',
+        ['Water Color'] = 'Цвет воды',
+        ['Custom Shadows'] = 'Свои тени',
+        ['Shadow Strength'] = 'Сила теней',
+        ['Rainbow'] = 'Радуга',
+        ['Saturation'] = 'Насыщенность',
+        ['Font Size'] = 'Размер шрифта',
+        ['Text Style'] = 'Стиль текста',
+        ['Shadow'] = 'Тень',
+        ['Sky'] = 'Небо',
+        ['Silhouette'] = 'Силуэт',
+        ['Chams'] = 'Чамсы',
+        ['Tracers'] = 'Трассеры',
+        ['Texture'] = 'Текстура',
+        ['Keep'] = 'Оставить',
+        ['Remove'] = 'Убрать',
+        ['Lighting'] = 'Освещение',
+        ['Normal'] = 'Обычное',
+        ['Bright'] = 'Яркое',
+        ['Flat (no light)'] = 'Плоское (без света)',
+        ['Silhouette (walls)'] = 'Силуэт (сквозь стены)',
+        ['Silhouette When'] = 'Когда силуэт',
+        ['Silhouette Width'] = 'Ширина силуэта',
+        ['Silhouette Glow'] = 'Свечение силуэта',
+        ['Always'] = 'Всегда',
+        ['Visibility'] = 'По видимости',
+        ['Team Color'] = 'Цвет команды',
+        ['Sun & Clouds'] = 'Солнце и облака',
+        ['Sky & Fog'] = 'Небо и туман',
+        ['ESP Text'] = 'Текст ESP',
+    }
+    for k, v in pairs(add) do RU[k] = v end
+end
 do
     local add = {
         ['BOX'] = 'РАМКА',
@@ -653,6 +712,7 @@ function VIS.CLR(l, rgb, key) return { l = l, kind = 'color', def = true, rgb = 
 VIS.HEAD = { 'Off', 'Circle', 'Filled' }
 VIS.SUB_BOX = { title = 'BOX', rows = CARD('esp_box', {
     T_('Enabled', true, 'esp_box'),
+    SEL('Color Mode', { 'Visibility', 'By Health', 'Team Color' }, 0, 'esp_box_cm'),
     SEL('Style', { 'Corners', 'Full', 'Rounded', '3D' }, 0, 'esp_box_style'),
     VIS.CLR('Visible Color', { 102, 124, 246 }, 'esp_box_vis'),
     VIS.CLR('Hidden Color', { 255, 90, 120 }, 'esp_box_hid'),
@@ -714,6 +774,12 @@ VIS.SUB_CHAMS = { title = 'CHAMS', rows = CARD('chm', {
     VIS.CLR('On Shot Color', { 255, 255, 255 }, 'chm_shot'),
     SL('Brightness', 50, 200, 100, '%d%%', false, 'chm_bright'),
     T_('Paint Same Skin', true, 'chm_same'),
+    SEL('Texture', { 'Keep', 'Remove' }, 1, 'chm_tex'),
+    SEL('Lighting', { 'Normal', 'Bright', 'Flat (no light)' }, 1, 'chm_light'),
+    COL('Silhouette (walls)', true, { 255, 70, 110, 150 }, 'chm_sil'),
+    SEL('Silhouette When', { 'Behind Walls', 'Always' }, 0, 'chm_sil_when'),
+    SL('Silhouette Width', 50, 200, 100, '%d%%', false, 'chm_sil_w'),
+    T_('Silhouette Glow', true, 'chm_sil_glow'),
     SEL('Local Player', CHAMS, 0, 'chm_local'),
     VIS.CLR('Local Color', { 255, 200, 80 }, 'chm_local_c'),
 }) }
@@ -735,6 +801,8 @@ VIS.SUB_HM = { title = 'HIT MARKER', rows = CARD('hm', {
 }) }
 VIS.SUB_VIEW = { title = 'VIEW OPTIONS', rows = CARD('v', {
     T_('Override FOV', false, 'v_fov_on'),
+    T_('Night Vision', false, 'v_nv'),
+    T_('Thermal Vision', false, 'v_ir'),
     SL('Field of View', 50, 120, 85, '%d', false, 'v_fov'),
 }) }
 VIS.WEATHERS = { 'Sunny', 'Extra Sunny', 'Clear', 'Cloudy', 'Rainy', 'Foggy', 'Sandstorm', 'Purple', 'Green', 'Dark Red', 'Toxic', 'Underwater' }
@@ -795,6 +863,45 @@ VIS.SUB_OBJ = { title = 'OBJECTS', rows = CARD('ob', {
     SL('Limit', 10, 200, 60, '%d', false, 'ob_lim'),
 }) }
 
+VIS.SUB_SKY = { title = 'SKY & FOG', rows = CARD('sky', {
+    T_('Override Fog', false, 'fog_on'),
+    SL('Fog Start', 0, 3000, 250, '%d m', false, 'fog_start'),
+    SL('Draw Distance', 50, 3000, 900, '%d m', false, 'fog_far'),
+    T_('Custom Sky', false, 'sky_on'),
+    VIS.CLR('Sky Top', { 40, 60, 160 }, 'sky_top'),
+    VIS.CLR('Sky Bottom / Fog', { 190, 110, 230 }, 'sky_bot'),
+}) }
+VIS.SUB_SUN = { title = 'SUN & CLOUDS', rows = CARD('sun', {
+    T_('Custom Sun', false, 'sun_on'),
+    VIS.CLR('Sun Core', { 255, 230, 160 }, 'sun_core'),
+    VIS.CLR('Sun Halo', { 255, 120, 60 }, 'sun_halo'),
+    SL('Sun Size', 0, 30, 6, '%.1f', true, 'sun_size'),
+    T_('Custom Clouds', false, 'cl_on'),
+    VIS.CLR('Low Clouds', { 200, 200, 255 }, 'cl_low'),
+    VIS.CLR('Fluffy Clouds', { 255, 180, 230 }, 'cl_fluffy'),
+    SL('Clouds Alpha', 0, 255, 200, '%d', false, 'cl_alpha'),
+}) }
+VIS.SUB_LIGHT = { title = 'LIGHTING', rows = CARD('lt', {
+    T_('Custom Ambient', false, 'amb_on'),
+    VIS.CLR('Ambient Color', { 120, 120, 140 }, 'amb_c'),
+    SL('Ambient Power', 0, 300, 100, '%d%%', false, 'amb_pow'),
+    T_('Color Filter', false, 'flt_on'),
+    VIS.CLR('Filter Color', { 120, 80, 255, 90 }, 'flt_c'),
+    T_('Custom Water', false, 'wat_on'),
+    VIS.CLR('Water Color', { 40, 160, 255, 200 }, 'wat_c'),
+    T_('Custom Shadows', false, 'shd_on'),
+    SL('Shadow Strength', 0, 255, 160, '%d', false, 'shd_val'),
+}) }
+VIS.SUB_RB = { title = 'RAINBOW', rows = CARD('rb', {
+    MUL('Rainbow', { 'Box', 'Skeleton', 'Chams', 'Tracers', 'Crosshair', 'Glow', 'Silhouette', 'Snaplines', 'Sky' }, 0, 'rb_mask'),
+    SL('Speed', 1, 20, 6, '%d', false, 'rb_speed'),
+    SL('Saturation', 10, 100, 80, '%d%%', false, 'rb_sat'),
+}) }
+VIS.SUB_TXT = { title = 'ESP TEXT', rows = CARD('txt', {
+    SL('Font Size', 9, 26, 13, '%d', false, 'esp_font'),
+    SEL('Text Style', { 'Shadow', 'Outline', 'None' }, 0, 'esp_txt_ol'),
+}) }
+
 local ROWS = {
     rage_main = CARD('rage_main', {
         T_('Enabled'), T_('Silent Aim', true), T_('Automatic Fire', true), T_('Aim Through Walls', true),
@@ -847,7 +954,7 @@ local ROWS = {
         CH('Chams Settings', VIS.SUB_CHAMS), COL('Soul Particles', false, { 150, 170, 255 }), COL('Glow', true, { 102, 124, 246 }),
     }),
     w_view = CARD('w_view', {
-        CH('View Options', VIS.SUB_VIEW), T_('Night Vision', false, 'v_nv'), T_('Thermal Vision', false, 'v_ir'),
+        CH('View Options', VIS.SUB_VIEW), CH('Lighting', VIS.SUB_LIGHT), CH('Sun & Clouds', VIS.SUB_SUN),
         CH('Weather & Time', VIS.SUB_WT), CH('Screen Effects', VIS.SUB_SCR), CH('Crosshair', VIS.SUB_XH),
     }),
     w_hud = CARD('w_hud', {
@@ -856,10 +963,11 @@ local ROWS = {
     }),
     w_esp = CARD('w_esp', {
         CH('Vehicles', VIS.SUB_VEH), CH('Pickups', VIS.SUB_PK), CH('Objects', VIS.SUB_OBJ),
-        COL('Actors (NPC)', false, { 255, 150, 220 }, 'es_actors'), T_('Kill Effect', true, 'sc_kill'),
+        COL('Actors (NPC)', false, { 255, 150, 220 }, 'es_actors'), CH('Sky & Fog', VIS.SUB_SKY), CH('ESP Text', VIS.SUB_TXT),
     }),
     w_misc = CARD('w_misc', {
         CH('Hit Marker', VIS.SUB_HM), CH('Bullet Tracers', VIS.SUB_TR), COL('Bullet Impacts', true, { 102, 124, 246 }),
+        T_('Kill Effect', true, 'sc_kill'), CH('Rainbow', VIS.SUB_RB),
     }),
     m_move = CARD('m_move', {
         CH('Bunny Hop', SUB_BHOP), T_('Air Strafe'), T_('Jump Bug'), T_('Standalone Quick Stop'),
@@ -2201,8 +2309,24 @@ VIS.LINKS = { { 8, 5 }, { 5, 4 }, { 4, 3 }, { 3, 2 }, { 5, 22 }, { 22, 23 }, { 2
 VIS.BONE_IDS = { 2, 3, 4, 5, 8, 22, 23, 24, 25, 32, 33, 34, 35, 41, 42, 43, 44, 51, 52, 53, 54 }
 
 -- ---------- цвета (O[key_rgb] = 0xRRGGBBAA) ----------
-function VIS.rgb(key)
+VIS.RB = { esp_box_vis = 1, esp_box_hid = 1, esp_skel = 2, esp_skel_hid = 2, chm_vis = 4, chm_hid = 4, chm_local_c = 4,
+    trc_local = 8, trc_enemies = 8, xh_c = 16, pl_model_glow = 32, chm_sil = 64, esp_snap_c = 128, sky_top = 256, sky_bot = 256 }
+function VIS.rainbow(off, a)
+    local h = (os.clock() * (O.rb_speed or 6) * 0.05 + (off or 0)) % 1
+    local sat = (O.rb_sat or 80) / 100
+    local function ch(n)
+        local k = (n + h * 6) % 6
+        local v = 1 - math.max(0, math.min(k, 4 - k, 1))
+        return math.floor(255 * (1 - sat + sat * v))
+    end
+    return { ch(5), ch(3), ch(1), a or 255 }
+end
+function VIS.rgb(key, raw)
     local v = O[key .. '_rgb'] or DEF[key .. '_rgb'] or 0xFFFFFFFF
+    local rb = VIS.RB[key]
+    if rb and not raw and bit.band(O.rb_mask or 0, rb) ~= 0 then
+        return VIS.rainbow(key == 'sky_bot' and 0.5 or 0, v % 256)
+    end
     local c = VIS.cc[key]
     if c and c.v == v then return c end
     c = { math.floor(v / 16777216) % 256, math.floor(v / 65536) % 256, math.floor(v / 256) % 256, v % 256, v = v }
@@ -2217,7 +2341,7 @@ function VIS.openColor(key, x, y)
     if cp.open and cp.key == key then cp.open = false; return end
     cp.open, cp.key, cp.x, cp.y, cp.frame = true, key, x, y, imgui.GetFrameCount()
     cp.arr = cp.arr or imgui.new.float[4]()
-    local c = VIS.rgb(key)
+    local c = VIS.rgb(key, true)
     cp.arr[0], cp.arr[1], cp.arr[2], cp.arr[3] = c[1] / 255, c[2] / 255, c[3] / 255, c[4] / 255
     popup.open = false
 end
@@ -2363,16 +2487,28 @@ function VIS.paintPed(ped, mode, rgb, now)
     local ch = VIS.ch
     local cr, cg, cb, ca
     if mode > 0 then cr, cg, cb, ca = VIS.chamsColor(mode, rgb, now) end
+    local notex, light = (O.chm_tex or 0) == 1 and mode ~= 4, O.chm_light or 0
     return VIS.pedMaterials(ped, function(g, mat)
         local c = ffi.cast('uint8_t*', mat + 4)
+        local tex = ffi.cast('uint32_t*', mat)
+        local sp = ffi.cast('float*', mat + 0x0C)
         if mode == 0 then
             local o = ch.orig[mat]
-            if o then c[0], c[1], c[2], c[3] = o[1], o[2], o[3], o[4]; ch.orig[mat] = nil end
+            if o then
+                c[0], c[1], c[2], c[3] = o[1], o[2], o[3], o[4]
+                tex[0] = o.tex; sp[0], sp[1], sp[2] = o.a, o.s, o.d
+                ch.orig[mat] = nil
+            end
             local f = ch.gflag[g]
             if f then ffi.cast('uint32_t*', g + 8)[0] = f; ch.gflag[g] = nil end
             return
         end
-        if not ch.orig[mat] then ch.orig[mat] = { c[0], c[1], c[2], c[3] } end
+        if not ch.orig[mat] then ch.orig[mat] = { c[0], c[1], c[2], c[3], tex = tex[0], a = sp[0], s = sp[1], d = sp[2] } end
+        local o = ch.orig[mat]
+        tex[0] = notex and 0 or o.tex
+        if light == 1 then sp[0], sp[1], sp[2] = 2.5, 0, 1
+        elseif light == 2 then sp[0], sp[1], sp[2] = 6, 0, 0
+        else sp[0], sp[1], sp[2] = o.a, o.s, o.d end
         if not ch.gflag[g] then ch.gflag[g] = ffi.cast('uint32_t*', g + 8)[0] end
         ffi.cast('uint32_t*', g + 8)[0] = bit.bor(ch.gflag[g], 0x40)
         c[0], c[1], c[2], c[3] = cr, cg, cb, ca
@@ -2425,9 +2561,81 @@ function VIS.diag()
     chat(('id %d: материалов %s, скин %d (твой %d)'):format(e.id, tostring(okm and n or n), getCharModel(e.ped), getCharModel(PLAYER_PED)))
 end
 
+-- ---------- силуэт через стены (2D-чамсы по костям) ----------
+VIS.SIL_LINKS = { { 8, 5, 0.9 }, { 5, 3, 1.5 }, { 3, 2, 1.5 }, { 22, 23, 0.75 }, { 23, 24, 0.65 }, { 32, 33, 0.75 }, { 33, 34, 0.65 },
+    { 41, 42, 0.95 }, { 42, 43, 0.8 }, { 51, 52, 0.95 }, { 52, 53, 0.8 }, { 5, 22, 0.8 }, { 5, 32, 0.8 }, { 2, 41, 0.9 }, { 2, 51, 0.9 } }
+function VIS.drawSil(dl, e)
+    local b = e.bones
+    local base = (e.y2 - e.y1) * 0.075 * (O.chm_sil_w or 100) / 100
+    local c = VIS.rgb('chm_sil')
+    local a = c[4] or 150
+    local passes = O.chm_sil_glow and { { 2.2, 0.18 }, { 1.5, 0.3 }, { 1, 1 } } or { { 1, 1 } }
+    for _, ps in ipairs(passes) do
+        local col = C(c[1], c[2], c[3], a * ps[2])
+        for _, ln in ipairs(VIS.SIL_LINKS) do
+            local p, q = b[ln[1]], b[ln[2]]
+            if p and q then
+                local w = base * ln[3] * ps[1]
+                dl:AddLine(V(p[1], p[2]), V(q[1], q[2]), col, w)
+                dl:AddCircleFilled(V(q[1], q[2]), w * 0.5, col, 12)
+            end
+        end
+        local s1, s2, h1, h2 = b[22], b[32], b[51], b[41]
+        if s1 and s2 and h1 and h2 and ps[2] == 1 then
+            dl:AddQuadFilled(V(s1[1], s1[2]), V(s2[1], s2[2]), V(h2[1], h2[2]), V(h1[1], h1[2]), col)
+        end
+        if b[8] then dl:AddCircleFilled(V(b[8][1], b[8][2]), base * 1.05 * ps[1], col, 20) end
+    end
+end
+
+-- ---------- небо / туман / свет (CTimeCycle::m_CurrentColours 0xB7C4A0, GTA SA 1.0 US) ----------
+function VIS.tc16(addr, c)
+    local p = ffi.cast('int16_t*', addr)
+    p[0], p[1], p[2] = c[1], c[2], c[3]
+end
+function VIS.tcF(addr, c, alpha, mul)
+    local p = ffi.cast('float*', addr)
+    mul = mul or 1
+    p[0], p[1], p[2] = c[1] * mul, c[2] * mul, c[3] * mul
+    if alpha then p[3] = c[4] or 255 end
+end
+function VIS.timecycTick()
+    if O.fog_on then
+        ffi.cast('float*', 0xB7C4F0)[0] = O.fog_far or 900
+        ffi.cast('float*', 0xB7C4F4)[0] = math.min(O.fog_start or 250, (O.fog_far or 900) - 10)
+    end
+    if O.sky_on then
+        VIS.tc16(0xB7C4C4, VIS.rgb('sky_top'))
+        VIS.tc16(0xB7C4CA, VIS.rgb('sky_bot'))
+    end
+    if O.sun_on then
+        VIS.tc16(0xB7C4D0, VIS.rgb('sun_core'))
+        VIS.tc16(0xB7C4D6, VIS.rgb('sun_halo'))
+        ffi.cast('float*', 0xB7C4DC)[0] = O.sun_size or 6
+    end
+    if O.cl_on then
+        VIS.tc16(0xB7C4FC, VIS.rgb('cl_low'))
+        VIS.tc16(0xB7C502, VIS.rgb('cl_fluffy'))
+        ffi.cast('float*', 0xB7C538)[0] = O.cl_alpha or 200
+    end
+    if O.amb_on then
+        local m = (O.amb_pow or 100) / 100 / 255
+        VIS.tcF(0xB7C4A0, VIS.rgb('amb_c'), false, m)
+        VIS.tcF(0xB7C4AC, VIS.rgb('amb_c'), false, m)
+    end
+    if O.flt_on then
+        VIS.tcF(0xB7C518, VIS.rgb('flt_c'), true)
+        VIS.tcF(0xB7C528, VIS.rgb('flt_c'), true)
+    end
+    if O.wat_on then VIS.tcF(0xB7C508, VIS.rgb('wat_c'), true) end
+    if O.shd_on then ffi.cast('int16_t*', 0xB7C4E8)[0] = O.shd_val or 160 end
+end
+
 -- ---------- состояние мира (main-поток) ----------
 function VIS.worldTick(now)
     local st = VIS.st
+    local okt, et = pcall(VIS.timecycTick)
+    if not okt and not st.tcErr then st.tcErr = true; TR.T('vis.tc ' .. tostring(et)) end
     if st.nv ~= (O.v_nv or false) then st.nv = O.v_nv or false; pcall(setNightVision, st.nv) end
     if st.ir ~= (O.v_ir or false) then st.ir = O.v_ir or false; pcall(setInfraredVision, st.ir) end
     if st.hud ~= (O.hud_hide or false) then st.hud = O.hud_hide or false; pcall(displayHud, not st.hud) end
@@ -2512,7 +2720,7 @@ function VIS.collectPlayers(now, cx, cy, cz, fx, fy)
                             end
                             -- скелет / точка головы / направление взгляда
                             local okp, ptr = pcall(getCharPointer, ped)
-                            if okp and ptr and ptr ~= 0 and (O.esp_skel or O.esp_headdot or O.esp_look) then
+                            if okp and ptr and ptr ~= 0 and (O.esp_skel or O.esp_headdot or O.esp_look or O.chm_sil) then
                                 local bones = {}
                                 for _, bid in ipairs(VIS.BONE_IDS) do
                                     local okb, bx3, by3, bz3 = pcall(VIS.bone, ptr, bid)
@@ -2806,8 +3014,24 @@ function VIS.tick(ready)
 end
 
 -- ============================================================ отрисовка
+function VIS.ts(str)
+    local s = imgui.CalcTextSize(str)
+    local k = (O.esp_font or 13) / 13
+    return { x = s.x * k, y = s.y * k }
+end
 function VIS.text(dl, x, y, col, str)
-    dl:AddText(V(x + 1, y + 1), C(0, 0, 0, 200), str)
+    local sz, st = O.esp_font or 13, O.esp_txt_ol or 0
+    local offs = st == 0 and { { 1, 1 } } or (st == 1 and { { 1, 0 }, { -1, 0 }, { 0, 1 }, { 0, -1 } } or {})
+    if sz ~= 13 and VIS.fontPtrOk ~= false then
+        local ok = pcall(function()
+            local f = imgui.GetFont()
+            for _, o in ipairs(offs) do dl:AddTextFontPtr(f, sz, V(x + o[1], y + o[2]), C(0, 0, 0, 200), str) end
+            dl:AddTextFontPtr(f, sz, V(x, y), col, str)
+        end)
+        if ok then return end
+        VIS.fontPtrOk = false
+    end
+    for _, o in ipairs(offs) do dl:AddText(V(x + o[1], y + o[2]), C(0, 0, 0, 200), str) end
     dl:AddText(V(x, y), col, str)
 end
 function VIS.bigText(dl, x, y, col, str, size)
@@ -2878,6 +3102,10 @@ function VIS.drawPlayer(dl, e, sw, sh, now)
         local cxm = (x1 + x2) * 0.5
         gA = clamp(1.25 - e.dist / math.max(50, O.esp_maxdist or 300), 0.4, 1)
         local acc = vis and VIS.rgb('esp_box_vis') or VIS.rgb('esp_box_hid')
+        local bcm = O.esp_box_cm or 0
+        if bcm == 1 then local hk = e.hp / 100; acc = { 255 * math.min(1, 2 * (1 - hk)), 255 * math.min(1, 2 * hk), 70, 255 }
+        elseif bcm == 2 then acc = { e.r, e.g, e.b, 255 } end
+        if O.chm_sil and e.bones and ((O.chm_sil_when or 0) == 1 or not vis) then pcall(VIS.drawSil, dl, e) end
         if O.pl_model_glow then
             local gc = VIS.rgb('pl_model_glow')
             local w, h = x2 - x1, y2 - y1
@@ -2948,7 +3176,7 @@ function VIS.drawPlayer(dl, e, sw, sh, now)
                 dl:AddRectFilledMultiColor(V(bx, top), V(bx + bw, y2), c1, c1, c2, c2)
                 if O.esp_hp_num and e.hp < 100 then
                     local s = tostring(math.floor(e.hp))
-                    local ts = imgui.CalcTextSize(s)
+                    local ts = VIS.ts(s)
                     VIS.text(dl, bx + bw * 0.5 - ts.x * 0.5, top - ts.y * 0.5, C(240, 255, 240), s)
                 end
             else
@@ -2971,7 +3199,7 @@ function VIS.drawPlayer(dl, e, sw, sh, now)
         -- ник
         if O.esp_name then
             local label = O.esp_name_id and (e.name .. ' ' .. e.id) or e.name
-            local ts = imgui.CalcTextSize(label)
+            local ts = VIS.ts(label)
             local cm = O.esp_name_cm or 0
             local nc = cm == 0 and C(e.r, e.g, e.b) or (cm == 1 and VIS.C(VIS.rgb('esp_name_c')) or C(242, 244, 252))
             local py1 = y1 - ts.y - 7 - padT
@@ -2995,7 +3223,7 @@ function VIS.drawPlayer(dl, e, sw, sh, now)
             end
             if mode ~= 1 or not WICON[e.wid] then
                 local wn = WEAPON_NAME[e.wid] or ('#' .. e.wid)
-                local ts = imgui.CalcTextSize(wn)
+                local ts = VIS.ts(wn)
                 VIS.text(dl, cxm - ts.x * 0.5, wy, VIS.C(VIS.rgb('esp_wpn_c')), wn)
                 wy = wy + ts.y
             end
@@ -3003,9 +3231,9 @@ function VIS.drawPlayer(dl, e, sw, sh, now)
         -- справа: дистанция и флаги
         local fy = y1 - 1
         local fx = x2 + 5 + padR
-        if O.esp_dist then VIS.text(dl, fx, fy, C(170, 176, 196), ('%dm'):format(math.floor(e.dist))); fy = fy + 13 end
+        if O.esp_dist then VIS.text(dl, fx, fy, C(170, 176, 196), ('%dm'):format(math.floor(e.dist))); fy = fy + VIS.ts('A').y end
         if e.flags then
-            for _, f in ipairs(e.flags) do VIS.text(dl, fx, fy, C(f[2], f[3], f[4]), f[1]); fy = fy + 13 end
+            for _, f in ipairs(e.flags) do VIS.text(dl, fx, fy, C(f[2], f[3], f[4]), f[1]); fy = fy + VIS.ts('A').y end
         end
         gA = 1
     elseif e.ax and O.pl_enemy_offscreen_arrow then
@@ -3024,7 +3252,7 @@ function VIS.drawPlayer(dl, e, sw, sh, now)
         dl:AddTriangle(p1, p2, p3, C(255, 255, 255, 120 * pulse), 1.2)
         if O.esp_dist then
             local s2 = ('%dm'):format(math.floor(e.dist))
-            local ts = imgui.CalcTextSize(s2)
+            local ts = VIS.ts(s2)
             VIS.text(dl, tx - ax * (s + 6) - ts.x * 0.5, ty - ay * (s + 6) - ts.y * 0.5, C(220, 224, 240, 220 * pulse), s2)
         end
     end
@@ -3060,10 +3288,10 @@ function VIS.drawWorld(dl)
         if O.ve_name then lines[#lines + 1] = { v.name, C(255, 255, 255) } end
         if O.ve_driver and v.driver then lines[#lines + 1] = { v.driver, C(170, 200, 255) } end
         if O.ve_dist then lines[#lines + 1] = { ('%dm'):format(math.floor(v.dist)), C(170, 176, 196) } end
-        local yy = ty - #lines * 13 - (O.ve_hp and 6 or 0)
+        local yy = ty - #lines * VIS.ts('A').y - (O.ve_hp and 6 or 0)
         for _, l in ipairs(lines) do
-            local ts = imgui.CalcTextSize(l[1])
-            VIS.text(dl, tx - ts.x * 0.5, yy, l[2], l[1]); yy = yy + 13
+            local ts = VIS.ts(l[1])
+            VIS.text(dl, tx - ts.x * 0.5, yy, l[2], l[1]); yy = yy + VIS.ts('A').y
         end
         if O.ve_hp then
             local k = clamp((v.hp - 250) / 750, 0, 1)
@@ -3078,7 +3306,7 @@ function VIS.drawWorld(dl)
         dl:AddQuadFilled(V(x, y - s), V(x + s, y), V(x, y + s), V(x - s, y), VIS.C(pc, 200))
         dl:AddQuad(V(x, y - s - 2), V(x + s + 2, y), V(x, y + s + 2), V(x - s - 2, y), C(0, 0, 0, 150), 1)
         local t = (O.pk_id and ('pickup ' .. p[4]) or '') .. (O.pk_dist and ((O.pk_id and ' ' or '') .. math.floor(p[3]) .. 'm') or '')
-        if t ~= '' then local ts = imgui.CalcTextSize(t); VIS.text(dl, x - ts.x * 0.5, y + 8, VIS.C(pc), t) end
+        if t ~= '' then local ts = VIS.ts(t); VIS.text(dl, x - ts.x * 0.5, y + 8, VIS.C(pc), t) end
     end
     local oc = VIS.rgb('ob_on')
     for _, o in ipairs(VIS.obj) do
@@ -3092,7 +3320,7 @@ function VIS.drawWorld(dl)
         dl:AddRect(V(cx - w * 0.5 - 1, y1 - 1), V(cx + w * 0.5 + 1, y2 + 1), C(0, 0, 0, 150), 3, 15, 1)
         dl:AddRect(V(cx - w * 0.5, y1), V(cx + w * 0.5, y2), VIS.C(ac), 3, 15, 1.3)
         local t = ('NPC %d hp %dm'):format(a[5], math.floor(a[6]))
-        local ts = imgui.CalcTextSize(t)
+        local ts = VIS.ts(t)
         VIS.text(dl, cx - ts.x * 0.5, y1 - 15, VIS.C(ac), t)
     end
 end
