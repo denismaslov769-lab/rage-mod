@@ -20,24 +20,13 @@
 
 script_name('rage-mod')
 script_author('rage-mod')
-script_version('4.8.19')
+script_version('4.8.20')
 
 local imgui    = require 'mimgui'
 local encoding = require 'encoding'
 local inicfg   = require 'inicfg'
 local ffi      = require 'ffi'
--- запоминаем обработчики событий samp.events: на время выстрела движком их снимаем,
--- иначе MoonLoader повторно входит в скрипт -> «cannot resume non-suspended coroutine»
-local sampevH = {}
-local sampev
-do
-    local add = addEventHandler
-    addEventHandler = function(n, f) sampevH[#sampevH + 1] = { n, f }; return add(n, f) end
-    local ok, r = pcall(require, 'samp.events')
-    addEventHandler = add
-    if not ok then error(r) end
-    sampev = r
-end
+local sampev   = require 'samp.events'
 encoding.default = 'CP1251'
 local u8  = encoding.UTF8
 local new = imgui.new
@@ -273,10 +262,9 @@ local RU = {
     ['On Release'] = 'При отпускании', ['Shot or Release'] = 'Выстрел или отпускание', ['Method'] = 'Способ',
     ['Run Back'] = 'Бегом', ['Teleport'] = 'Телепорт', ['Return Speed'] = 'Скорость возврата',
     ['Show Position'] = 'Показывать точку', ['Through Walls'] = 'Сквозь стены',
-    ['Standing Spoof (real)'] = 'Подмена «стоит на земле» (настоящий)', ['Scripted Jump'] = 'Свой прыжок', ['Packet (fake)'] = 'Пакетом (фейк)',
+    ['Engine Shot (real)'] = 'Выстрел движком (настоящий)', ['Scripted Jump'] = 'Свой прыжок', ['Packet (fake)'] = 'Пакетом (фейк)',
     ['Rapid Fire'] = 'Рапид фаер в прыжке', ['Auto +C'] = 'Авто +C', ['AUTO +C'] = 'АВТО +C',
-    ['C Delay'] = 'Задержка C', ['Fast +C (pro)'] = 'Фаст +C (как у профи)', ['Classic'] = 'Классический',
-    ['Re-press Fire'] = 'Перенажимать огонь', ['Stand Up'] = 'Вставать обратно', ['Stand Delay'] = 'Задержка подъёма',
+    ['C Delay'] = 'Задержка C', ['Stand Up'] = 'Вставать обратно', ['Stand Delay'] = 'Задержка подъёма',
     ['Only When Aiming'] = 'Только при прицеливании', ['Weapons'] = 'Оружие',
     ['Jump Power'] = 'Сила прыжка', ['Rate Source'] = 'Темп стрельбы', ['Game (mods)'] = 'Как в игре (с модами)',
     ['Script'] = 'Скрипт (ползунок)', ['Own Jump'] = 'Свой прыжок с оружием',
@@ -1088,7 +1076,7 @@ VIS.SUB_QP = { title = 'QUICK PEEK ASSIST', rows = CARD('qp', {
 -- Jump Attack: в прыжке игра стрелять не даёт — выстрел (bullet sync + урон) отправляет скрипт
 VIS.SUB_JA = { title = 'JUMP ATTACK', rows = CARD('ja', {
     T_('Enabled', false, 'ja_on'),
-    SEL('Method', { 'Engine Shot (real)', 'Scripted Jump', 'Packet (old)', 'Standing Spoof' }, 0, 'ja_method5'),
+    SEL('Method', { 'Engine Shot (real)', 'Scripted Jump', 'Packet (fake)' }, 0, 'ja_method2'),
     SL('Jump Power', 3, 9, 5.5, '%.1f', true, 'ja_power'),
     SEL('Fire From', { 'On Click', 'With Trigger Bot', 'Click or Trigger' }, 2, 'ja_src'),
     T_('Need Target', false, 'ja_need2'),
@@ -1101,11 +1089,9 @@ VIS.SUB_JA = { title = 'JUMP ATTACK', rows = CARD('ja', {
 VIS.SUB_PC = { title = 'AUTO +C', rows = CARD('pc', {
     T_('Enabled', false, 'pc_on'),
     MUL('Weapons', { 'Deagle', 'Shotgun', 'Country Rifle', 'Sniper', 'M4 / AK' }, 0x01, 'pc_wpn'),
-    SEL('Mode', { 'Fast +C (pro)', 'Classic' }, 0, 'pc_mode'),
-    SL('C Delay', 0, 200, 0, '%d ms', false, 'pc_delay2'),
-    T_('Re-press Fire', true, 'pc_refire'),
-    T_('Stand Up', false, 'pc_stand2'),
-    SL('Stand Delay', 20, 300, 60, '%d ms', false, 'pc_stand_ms'),
+    SL('C Delay', 0, 200, 40, '%d ms', false, 'pc_delay'),
+    T_('Stand Up', true, 'pc_stand'),
+    SL('Stand Delay', 20, 300, 80, '%d ms', false, 'pc_stand_ms'),
     T_('Only When Aiming', true, 'pc_aim'),
 }) }
 local ROWS = {
@@ -2615,8 +2601,6 @@ function RG.onBullet(data)
     if silent and not tt and hc > 0 and math.random(100) > hc then return end
     -- триггер (в т.ч. «наперёд» — цель ещё за углом) приоритетнее: он уже решил, в кого стрелять
     local t = tt or RG.find(w, false, RG.originOf(data))
-    RG.lastSilent = ('сайлент=%s цель=%s триггер/прыжок=%s'):format(tostring(silent), t and t.id or 'нет', tt and tt.id or '-')
-    RG.lastSilentT = os.clock()
     TR.E(('silent on=%s tt=%s t=%s mb=%s'):format(tostring(silent), tt and tt.id or '-', t and t.id or '-', tostring(O.mb_on)))
     if not t then
         -- сайлент цель не нашёл (например, все за стеной) — пробуем Magic Bullet
@@ -2863,7 +2847,7 @@ end
 RG.JA_RATE = { [22] = 0.25, [23] = 0.4, [24] = 0.8, [25] = 1.0, [26] = 0.3, [27] = 0.35, [28] = 0.07, [29] = 0.09,
                [30] = 0.11, [31] = 0.11, [32] = 0.07, [33] = 1.0, [34] = 1.2, [38] = 0.03 }
 RG.ja = { lastT = 0, sending = false, warned = false }
-function RG.jaWindow() local m = O.ja_method5 or 0; return O.ja_on and (m == 0 or m == 2) and os.clock() - RG.ja.lastT < 0.25 end
+function RG.jaWindow() return O.ja_on and (O.ja_method2 or 0) ~= 1 and os.clock() - RG.ja.lastT < 0.25 end
 -- цель выстрела Jump Attack (для подмены пули в onBullet)
 function RG.jaShotTarget()
     local ja = RG.ja
@@ -2879,25 +2863,6 @@ end
 -- Повторный вход в Lua из FFI-вызова LuaJIT не поддерживает: состояние VM портилось,
 -- и после нескольких выстрелов ломались сайлент и вся стрельба. Из callMethod повторный вход разрешён.
 RG.jaBuf = ffi.new('float[6]')
-RG.EV_NET = { onSendPacket = true, onReceivePacket = true, onSendRpc = true, onReceiveRpc = true }
-function RG.evCanDetach() return type(removeEventHandler) == 'function' and #sampevH > 0 end
-function RG.evDetach()
-    if RG.evOff then return true end
-    RG.evOff = {}
-    for _, h in ipairs(sampevH) do
-        if RG.EV_NET[h[1]] then
-            local ok = pcall(removeEventHandler, h[1], h[2])
-            if not ok then return false end
-            RG.evOff[#RG.evOff + 1] = h
-        end
-    end
-    return true
-end
-function RG.evAttach()
-    if not RG.evOff then return end
-    for _, h in ipairs(RG.evOff) do pcall(addEventHandler, h[1], h[2]) end
-    RG.evOff = nil
-end
 -- CWeapon активного слота: int32[0]=тип, [1]=состояние, [2]=патроны в обойме, [3]=всего, [4]=таймер (мс)
 function RG.jaWeapon()
     local ped = getCharPointer(PLAYER_PED)
@@ -2930,11 +2895,7 @@ function RG.jaEngineFire(w, ox, oy, oz, tx, ty, tz, tped)
     if tped then local okp, pp = pcall(getCharPointer, tped); if okp and pp and pp ~= 0 then te = pp end end
     -- bool __thiscall CWeapon::Fire(CEntity* owner, CVector* origin, CVector* muzzle, CEntity* target, CVector* targetPos, CVector* driveBy)
     local st0, tm0 = wt[1], wt[4]
-    -- на время Fire снимаем обработчики samp.events: пуля/урон уходят на сервер напрямую от SA-MP
-    if not RG.evDetach() then RG.evAttach(); return false, 'detach failed' end
-    local okc, r = pcall(callMethod, 0x742300, wp, 6, 0, ped, base, base, te, base + 12, 0)
-    RG.evAttach()
-    if not okc then error(r) end
+    local r = callMethod(0x742300, wp, 6, 0, ped, base, base, te, base + 12, 0)
     r = r and bit.band(r, 0xFF) ~= 0
     local st1, clip = wt[1], wt[2]
     if clip > 0 then wt[1] = 0 end                            -- FIRING не оставляем: оружие снова «готово»
@@ -3023,13 +2984,8 @@ end
 function RG.jaTick(free)
     local ja = RG.ja
     if not O.ja_on or not free or not spawnedAt or os.clock() - spawnedAt < 5 then return end
-    local method = O.ja_method5 or 0
+    local method = O.ja_method2 or 0
     if method == 1 then return RG.jaJumpTick(free, true) end
-    if method == 3 then return RG.jaSpoofTick(free) end
-    if method == 0 and not RG.evCanDetach() then
-        if not ja.warnDet then ja.warnDet = true; chat('Jump Attack: Engine Shot недоступен (нет removeEventHandler), стреляю пакетом') end
-        method = 2
-    end
     -- движок отказывается стрелять из задачи игрового прыжка (поэтому без бхопа/аир-стрейфа не работало):
     -- прыжок с оружием всегда делает скрипт, без задачи прыжка — и выстрел движком проходит стабильно
     if method == 0 and O.ja_ownjump ~= false then RG.jaJumpTick(free, false) end
@@ -3042,7 +2998,6 @@ function RG.jaTick(free)
     local click = src ~= 1 and isKeyDown(0x01)
     local trig = src ~= 0 and O.tb_on and now - RG.tb.fireT < 0.05
     if not click and not trig then return end
-    if ja.busy and now - ja.lastT < 0.5 then return end
     -- оружие должно быть готово (не перезарядка, есть патроны, таймер игры прошёл)
     if method == 0 and not RG.jaGameReady() then return end
     -- Rapid Fire выключен — обычный темп оружия (как на земле, по анимации); включён — так быстро, как даёт таймер оружия
@@ -3075,150 +3030,41 @@ function RG.jaTick(free)
     end
     ja.lastT = now
     pcall(RG.jaAnim, w)
-    -- ВСЁ, что синхронно вызывает наши же sampev-хуки (force sync, Fire движка, отправка пакета),
-    -- делаем из отдельного lua_thread, а не из main-корутины: иначе MoonLoader при вызове хука
-    -- пытается возобновить уже работающую корутину -> «cannot resume non-suspended coroutine» и скрипт умирает
-    ja.busy = true
-    local ox, oy, oz, tx, ty, tz = d.origin.x, d.origin.y, d.origin.z, d.target.x, d.target.y, d.target.z
-    local job = (function()
-        pcall(sampForceOnfootSync)
-        pcall(sampForceAimSync)
-        if method == 0 then
-            -- настоящий выстрел движком; подмену пули в цель и урон сделает onBullet (как у сайлента)
-            ja.t, ja.lastT = t, os.clock()
-            local ok, r, why = pcall(RG.jaEngineFire, w, ox, oy, oz, tx, ty, tz, t and t.ped)
-            TR.E('ja.engine ok=' .. tostring(ok) .. ' r=' .. tostring(r) .. ' ' .. tostring(why))
-            if not ok and not ja.warned then ja.warned = true; chat('Jump Attack: ошибка выстрела движком: ' .. tostring(r)) end
-            if ok and r then RG.qp.shotT = os.clock() end
-            ja.busy = false
-            return
+    pcall(sampForceOnfootSync)
+    pcall(sampForceAimSync)
+    if method == 0 then
+        -- настоящий выстрел движком; подмену пули в цель и урон сделает onBullet (как у сайлента)
+        ja.t = t
+        local ok, r, why = pcall(RG.jaEngineFire, w, d.origin.x, d.origin.y, d.origin.z, d.target.x, d.target.y, d.target.z, t and t.ped)
+        TR.E('ja.engine ok=' .. tostring(ok) .. ' r=' .. tostring(r) .. ' ' .. tostring(why))
+        if not ok and not ja.warned then ja.warned = true; chat('Jump Attack: ошибка выстрела движком: ' .. tostring(r)) end
+        if ok and r then RG.qp.shotT = now end
+        return
+    end
+    local okb, eb = pcall(RG.jaSendBullet, d)
+    if not okb then
+        TR.E('ja.err ' .. tostring(eb))
+        if not ja.warned then ja.warned = true; chat('Jump Attack: не удалось отправить выстрел (нужен SAMPFUNCS)') end
+        return
+    end
+    if O.ja_ammo then pcall(setCharAmmo, PLAYER_PED, w, ammo - 1) end
+    RG.qp.shotT = now
+    pcall(VIS.ownShot, d)
+    TR.E('ja.shot ' .. tostring(d.targetId))
+    if t then
+        local id, bp = t.id, t.bp
+        if bit.band(O.m_feat_log_events or 0, 1) ~= 0 then
+            local okn, nm = pcall(sampGetPlayerNickname, id)
+            chat(('jump {3DE07A}%.1f{FFFFFF} -> %s[%d]'):format(dmg, okn and nm or '?', id))
         end
-        local okb, eb = pcall(RG.jaSendBullet, d)
-        ja.busy = false
-        if not okb then
-            TR.E('ja.err ' .. tostring(eb))
-            if not ja.warned then ja.warned = true; chat('Jump Attack: не удалось отправить выстрел (нужен SAMPFUNCS)') end
-            return
-        end
-        if O.ja_ammo then pcall(setCharAmmo, PLAYER_PED, w, ammo - 1) end
-        RG.qp.shotT = os.clock()
-        pcall(VIS.ownShot, d)
-        TR.E('ja.shot ' .. tostring(d.targetId))
-        if t then
-            local id, bp = t.id, t.bp
-            if bit.band(O.m_feat_log_events or 0, 1) ~= 0 then
-                local okn, nm = pcall(sampGetPlayerNickname, id)
-                chat(('jump {3DE07A}%.1f{FFFFFF} -> %s[%d]'):format(dmg, okn and nm or '?', id))
-            end
+        lua_thread.create(function()
+            wait(0)
             if not sampIsPlayerConnected(id) then return end
             pcall(sampForceOnfootSync)
             sampSendGiveDamage(id, dmg, w, bp)
-            if RG.on() and O.rage_other_double_tap then
-                lua_thread.create(function() wait(60); sampSendGiveDamage(id, dmg, w, bp) end)
-            end
-        end
-    end)
-    job()
-end
-
--- Подмена «стоит на земле»: GTA не даёт целиться/стрелять, пока у педа снят флаг bIsStanding
--- (CPed + 0x46C, бит 0). В воздухе, когда хочешь стрелять, ставим его каждый кадр — игра сама
--- целится и стреляет: настоящая пуля, анимация, звук, синк, урон, сайлент/триггер/+C/рапид-моды работают как на земле.
--- Никаких вызовов функций игры из Lua — значит, никаких «cannot resume non-suspended coroutine».
-function RG.jaSpoofTick(free)
-    local ja = RG.ja
-    if O.ja_ownjump ~= false then RG.jaJumpTick(free, false) end
-    if not free or not isCharOnFoot(PLAYER_PED) or isCharInWater(PLAYER_PED) then return end
-    local now = os.clock()
-    -- «в воздухе» считаем сами: после нашей подмены isCharInAir начинает врать (флаг-то мы поставили),
-    -- и раньше подмена выключалась через кадр — поэтому персонаж даже не пытался стрелять
-    local x, y, z = getCharCoordinates(PLAYER_PED)
-    local _, _, vz = getCharVelocity(PLAYER_PED)
-    local h = z - getGroundZFor3dCoord(x, y, z) - 1.0
-    local air = isCharInAir(PLAYER_PED) or (h > 0.2 and (math.abs(vz) > 0.3 or now - (ja.spoofT or 0) < 0.15))
-    if not air then return end
-    local w = getCurrentCharWeapon(PLAYER_PED)
-    if not RG.DMG[w] then return end
-    local src = O.ja_src or 2
-    local trig = src ~= 0 and O.tb_on and now - RG.tb.fireT < 0.05
-    local want = isKeyDown(0x02) or (src ~= 1 and isKeyDown(0x01)) or trig
-    if not want then return end
-    local wt, ped = RG.jaWeapon()
-    if not ped then return end
-    local f = ffi.cast('uint8_t*', ped + 0x46C)
-    local f0, f1 = f[0], f[1]
-    f[0] = bit.bor(f[0], 0x03)                                  -- bIsStanding + bWasStanding
-    f[1] = bit.band(f[1], 0xFD)                                 -- bIsInTheAir = false (бит 9)
-    ja.spoofT = now
-    if trig then setGameKeyState(6, 255); setGameKeyState(17, 255) end
-    -- рапид в прыжке: оружие «готово» раньше, чем закончится анимация выстрела
-    if O.ja_rapid and wt and wt[1] == 1 and wt[2] > 0 then
-        local iv = (RG.JA_RATE[w] or 0.3) / ((O.ja_rate or 100) / 100) * 0.5
-        if now - (RG.qp.shotT or 0) >= iv then wt[1] = 0; wt[4] = 0 end
-    end
-    if now - (ja.spoofLog or 0) > 0.25 then
-        ja.spoofLog = now
-        TR.E(('ja.spoof w%d h=%.2f vz=%.1f flags %02X/%02X aimGun=%d st=%d'):format(w, h, vz, f0, f1,
-            bit.band(f[0], 0x10) ~= 0 and 1 or 0, wt and wt[1] or -1))
-    end
-end
-
--- очередь задач Jump Attack: выполняются в отдельном lua_thread (после wait — когда main-корутина на паузе)
-RG.jaJobs = {}
-function RG.jaRun(fn)
-    RG.jaJobs[#RG.jaJobs + 1] = fn
-    if not RG.jaW or RG.jaW.dead then
-        RG.jaW = lua_thread.create(function()
-            while true do
-                wait(0)
-                local j = table.remove(RG.jaJobs, 1)
-                while j do
-                    local ok, e = pcall(j)
-                    if not ok then TR.E('ja.job.err ' .. tostring(e)); RG.ja.busy = false end
-                    j = table.remove(RG.jaJobs, 1)
-                end
-            end
+            if RG.on() and O.rage_other_double_tap then wait(60); sampSendGiveDamage(id, dmg, w, bp) end
         end)
     end
-end
-
--- /ragemd_silent — диагностика сайлента прямо в чат
-function RG.diag()
-    local w = getCurrentCharWeapon(PLAYER_PED)
-    chat(('silent: v%s | Рейдж=%s Тихий аим=%s | оружие %d (урон %s) | FOV %.0f | сквозь стены=%s | хитбоксы 0x%X | MB=%s'):format(
-        thisScript().version, tostring(RG.on()), tostring(O.rage_main_silent_aim), w, tostring(RG.DMG[w]),
-        O.rage_main_field_of_view or 180, tostring(O.rage_main_aim_through_walls), O.rage_sel_hitboxes or 7, tostring(O.mb_on)))
-    local cx, cy, cz, fx, fy, fz = RG.cam()
-    local orgs = RG.origins()
-    local myId = RG.myId()
-    local n, nf, nv = 0, 0, 0
-    for id = 0, sampGetMaxPlayerId(false) do
-        if id ~= myId and sampIsPlayerConnected(id) then
-            local ok, ped = sampGetCharHandleBySampPlayerId(id)
-            if ok and doesCharExist(ped) and not isCharDead(ped) then
-                n = n + 1
-                local x, y, z = getCharCoordinates(ped)
-                local dx, dy, dz = x - cx, y - cy, z + 0.35 - cz
-                local dist = math.sqrt(dx * dx + dy * dy + dz * dz)
-                local ang = math.deg(math.acos(math.max(-1, math.min(1, (dx * fx + dy * fy + dz * fz) / dist))))
-                if ang <= (O.rage_main_field_of_view or 180) then nf = nf + 1 end
-                local vis = RG.visAny(orgs, x, y, z + 0.35)
-                if vis then nv = nv + 1 end
-                if n <= 4 then
-                    chat(('  id %d: %.0fм угол %.0f° видим=%s пауза=%s hp=%d'):format(id, dist, ang, tostring(vis),
-                        tostring(sampIsPlayerPaused(id)), sampGetPlayerHealth(id)))
-                end
-            end
-        end
-    end
-    chat(('  игроков рядом %d, в FOV %d, видимых %d, точек обзора %d'):format(n, nf, nv, #orgs))
-    if RG.lastSilentT then
-        chat(('  последний выстрел (%.1f с назад): %s'):format(os.clock() - RG.lastSilentT, RG.lastSilent))
-    else
-        chat('  выстрелов через сайлент ещё не было (хук пули не срабатывал)')
-    end
-    local t = RG.find(w, false)
-    chat('  сейчас RG.find -> ' .. (t and ('id ' .. t.id) or 'нет цели'))
 end
 
 -- ---------- AUTO +C ----------
@@ -3233,40 +3079,8 @@ function RG.pcShot()
     if O.pc_aim and not isKeyDown(0x02) then return end
     RG.pc.pending = true
 end
--- Фаст +C: покадровая машина состояний в main-цикле (без lua_thread и wait — без лишних кадров).
--- выстрел -> [задержка] -> C нажат 1 кадр (+ огонь отпущен на 1 кадр, чтобы зажатая ЛКМ сразу дала
--- следующий выстрел) -> стреляешь из приседа -> следующий C поднимает. Ритм: выстрел-C-выстрел-C.
-function RG.pcFast(free)
-    local pc = RG.pc
-    local now = os.clock()
-    if pc.pending then
-        pc.pending = false
-        pc.stage, pc.t = 1, now
-    end
-    if not pc.stage then return end
-    if not free then pc.stage = nil; return end
-    if pc.stage == 1 then
-        if (now - pc.t) * 1000 < (O.pc_delay2 or 0) then return end
-        setGameKeyState(18, 255)                               -- C
-        if O.pc_refire ~= false then setGameKeyState(17, 0) end
-        TR.E('pc.c')
-        pc.stage = 2
-    elseif pc.stage == 2 then
-        setGameKeyState(18, 0)
-        if O.pc_refire ~= false then setGameKeyState(17, 0) end
-        pc.stage, pc.t = (O.pc_stand2 and 3 or nil), now
-    elseif pc.stage == 3 then
-        if (now - pc.t) * 1000 < (O.pc_stand_ms or 60) then return end
-        if isCharDucking(PLAYER_PED) then setGameKeyState(18, 255); TR.E('pc.stand') end
-        pc.stage = 4
-    elseif pc.stage == 4 then
-        setGameKeyState(18, 0)
-        pc.stage = nil
-    end
-end
 function RG.pcTick(free)
     local pc = RG.pc
-    if (O.pc_mode or 0) == 0 then return RG.pcFast(free) end
     if not pc.pending then return end
     pc.pending = false
     if pc.busy or not free then return end
@@ -3276,10 +3090,10 @@ function RG.pcTick(free)
             for _ = 1, 2 do setGameKeyState(18, 255); wait(0) end
             setGameKeyState(18, 0); wait(0)
         end
-        wait(O.pc_delay2 or 0)
+        wait(O.pc_delay or 40)
         TR.E('pc.crouch')
         tap()
-        if O.pc_stand2 then
+        if O.pc_stand ~= false then
             wait(O.pc_stand_ms or 80)
             if isCharDucking(PLAYER_PED) then TR.E('pc.stand'); tap() end
         end
@@ -5231,7 +5045,6 @@ function main()
     loadConfig()
     sampRegisterChatCommand('ragemd', toggleMenu)
     sampRegisterChatCommand('ragemd_chams', function() pcall(VIS.diag) end)
-    sampRegisterChatCommand('ragemd_silent', function() local ok, e = pcall(RG.diag); if not ok then chat('diag err: ' .. tostring(e)) end end)
     sampRegisterChatCommand('ragemd_update', function()
         checkUpdate(true, function(v)
             if v then chat('скачана {3DE07A}v' .. v .. '{FFFFFF} — включится после перезапуска игры (или Ctrl+R)') end
